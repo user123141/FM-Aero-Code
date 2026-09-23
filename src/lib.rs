@@ -26,7 +26,7 @@ pub mod wasm;
 
 pub const FORMAT_VERSION: u8 = 2;
 pub const AUTHOR: &str = "Maksym Skorina";
-pub const VERSION: &str = "3.4.0";
+pub const VERSION: &str = "3.4.1";
 pub const PRODUCT_NAME: &str = "FM Aero Code 2";
 
 /// Hard cap on decompressed payload size (512 MiB).

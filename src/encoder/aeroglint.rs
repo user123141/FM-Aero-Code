@@ -15,7 +15,7 @@ pub const GUARD_OUTER: f32 = 0.85;
 pub const PILOT_RADIUS_NORM: f32 = 0.50;
 
 /// Central logo square side, in cells. 40 cells = 31% width.
-pub const LOGO_SIZE: u32 = 32;
+pub const LOGO_SIZE: u32 = 24;
 
 pub const PILOT_ANGLES: [f32; 4] = [
     std::f32::consts::PI / 6.0,

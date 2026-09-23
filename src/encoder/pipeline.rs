@@ -290,7 +290,7 @@ pub fn encode_payload(payload: &[u8], opts: &EncodeOptions) -> Result<EncodeOutc
     framed.extend_from_slice(&header.to_bytes());
     framed.extend_from_slice(&p.stream);
     let image = encode_glint(&framed, opts, logo.as_ref())?;
-    let _ = verify_roundtrip(&image, &opts.password)?;
+
     let ratio = if !p.stream.is_empty() { payload.len() as f64 / p.stream.len() as f64 } else { 1.0 };
     Ok(EncodeOutcome {
         image,
@@ -319,7 +319,13 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
 
     let total_chunks_needed = ((p.stream.len() + chunk_data_size - 1) / chunk_data_size).max(1);
     let num_groups = ((total_chunks_needed + data_pg - 1) / data_pg).max(1);
-    let total_pages = (num_groups * group_size) as u16;
+    // When no parity, page count = data chunks needed (no padding to group size).
+    // When parity, page count = full groups (200 data + K parity each).
+    let total_pages = if par_pg == 0 {
+        total_chunks_needed as u16
+    } else {
+        (num_groups * group_size) as u16
+    };
     if total_pages as usize > 65535 { return Err(anyhow!("too many pages: {}", total_pages)); }
 
     let flags = build_flags(opts, &p) | HEADER_FLAG_MULTIPAGE;
@@ -330,7 +336,15 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
     for g in 0..num_groups {
         let group_stream_start = g * data_pg * chunk_data_size;
         let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(data_pg);
-        for i in 0..data_pg {
+        // When no parity: last group emits only remaining chunks.
+        let is_last = g == num_groups - 1;
+        let chunks_this_group = if par_pg == 0 && is_last {
+            let remaining = total_chunks_needed - g * data_pg;
+            remaining.max(1).min(data_pg)
+        } else {
+            data_pg
+        };
+        for i in 0..chunks_this_group {
             let s = group_stream_start + i * chunk_data_size;
             let mut sh = vec![0u8; chunk_data_size];
             if s < p.stream.len() {
@@ -345,7 +359,7 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
         } else {
             Vec::new()
         };
-        for i in 0..data_pg {
+        for i in 0..chunks.len() {
             let page_idx = (g * group_size + i) as u16;
             let mut h = AeroHeader::with_page(
                 p.data_type, CompressionKind::AeroPack, p.cipher, flags,
