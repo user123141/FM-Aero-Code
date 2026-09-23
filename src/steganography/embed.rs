@@ -23,13 +23,13 @@ use crate::steganography::dct::{dct8x8, idct8x8, BLOCK_AREA};
 use crate::steganography::STEGO_MAGIC;
 
 const MIN_SIDE: u32 = 64;
-const ROBUST_IDX: [usize; 8] = [1, 8, 9, 2, 3, 10, 16, 17];
+const ROBUST_IDX: [usize; 12] = [1, 8, 9, 2, 3, 10, 16, 17, 4, 11, 18, 24];
 const ROBUST_DELTA_SET: [f32; 4] = [18.0, 22.0, 26.0, 30.0];
 const ROBUST_REFINE: usize = 8;
 
 const FIXED_HEADER_BYTES: usize = 218;
 const FIXED_HEADER_BITS: usize = FIXED_HEADER_BYTES * 8;
-const HEADER_COPIES: usize = 5;
+const HEADER_COPIES: usize = 4;
 const MULTIPLIED_HEADER_BITS: usize = FIXED_HEADER_BITS * HEADER_COPIES;
 
 const SIG_PUB_LEN: usize = 32;
@@ -101,20 +101,26 @@ pub struct StegoExtract {
 pub fn capacity_bytes(w: u32, h: u32) -> usize {
     capacity_bytes_for(w, h, StegoMode::BitPerfect)
 }
+/// Max stream overhead bytes inside the visible stream (before fec_data):
+/// magic(4) + fec_len(4) + flags(1) + hash(8) + name_len(1) + name(<=200)
+/// + meta_len(2) + meta(<=512) + sig(96)
+const STREAM_OVERHEAD_MAX: usize = 4 + 4 + 1 + 8 + 1 + 200 + 2 + 512 + SIG_TOTAL;
+
 pub fn capacity_bytes_for(w: u32, h: u32, mode: StegoMode) -> usize {
     match mode {
         StegoMode::BitPerfect => {
             let bits = (w as usize) * (h as usize) * 3;
             let raw = bits / 8;
-            let after = raw.saturating_sub(18 + 200 + 512 + SIG_TOTAL);
+            let after = raw.saturating_sub(STREAM_OVERHEAD_MAX);
             (after * 223) / 255
         }
         StegoMode::Robust => {
             let blocks = (w as usize / 8) * (h as usize / 8);
             let slots = blocks * ROBUST_IDX.len();
             let payload_slots = slots.saturating_sub(MULTIPLIED_HEADER_BITS);
-            let payload_bytes = payload_slots / 8;
-            (payload_bytes * 223) / 255
+            let payload_stream_bytes = payload_slots / 8;
+            let fec_max = payload_stream_bytes.saturating_sub(STREAM_OVERHEAD_MAX);
+            (fec_max * 223) / 255
         }
     }
 }

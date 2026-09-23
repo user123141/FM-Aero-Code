@@ -241,3 +241,42 @@ FM Aero Code's stego channel embeds the signature **inside the pixels**:
 - v4.x: **Chain of custody** - each re-sign adds a block
 - v5.x: **Blockchain anchor** - timestamp cross-verified on public chain
 - v5.x: **Multi-signature** - author + timestamp authority + validator
+## Detailed roadmap (v3.9.x - v5.x)
+
+### v3.9.x - Stego polishing
+
+- **v3.9.6** *(current)* - capacity fix, 12-coeff Robust, decoded card metadata
+- **v3.9.7** - web stego UI (index.html toggle AeroGlint/Stego), scanner auto-retry
+- **v3.9.8** - Dual-layer embed (Robust + BitPerfect in one image)
+- **v3.9.9** - ARQ feedback: show missing pages, request re-transmit
+
+### v3.10.x - AeroGlint expansion
+
+- **v3.10.0** - RGB-dup: 3x density in same 128x128 grid (3 independent FFTs)
+- **v3.10.1** - Watson perceptual masking for adaptive QIM delta
+- **v3.10.2** - Cross-channel calibration for camera color shifts
+- **v3.10.3** - Dot-gain pre-emphasis for print quality
+- **v3.10.4** - Soft-decision RS decoding (erasure-aware)
+
+### v4.x - Performance + robustness
+
+- **v4.0.0** - WebGL/WebGPU FFT (60 FPS browser scanner)
+- **v4.0.1** - WebWorkers + WASM threads (wasm-bindgen-rayon)
+- **v4.0.2** - Zero-copy WASM frame pipeline
+- **v4.1.0** - Fountain codes (LT/Raptor) - 50% loss recovery
+- **v4.2.0** - Progressive decoding (metadata in low freqs, payload in high)
+- **v4.3.0** - Timestamp authority + blockchain anchor
+- **v4.4.0** - Multi-signature (author + validator + TSA)
+
+### v5.x - AI + advanced
+
+- **v5.0.0** - AI-robust stego (learn to survive inpainting)
+- **v5.0.1** - Stego stability vs Topaz Gigapixel upscaling
+- **v5.1.0** - Zero-knowledge proof of ownership
+- **v5.2.0** - Adaptive constellation (QPSK/16-QAM/64-QAM auto)
+- **v5.3.0** - Video mode (AeroPack Video, inter-frame compression)
+
+### Not planned
+
+- QR-code fallback (redundant - we have a better native format)
+- Detached GPG-style `.sig` files (defeats the point of covert stego)

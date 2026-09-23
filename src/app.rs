@@ -127,6 +127,9 @@ pub struct FmAeroApp {
     stego_last_pubkey: String,
     stego_sig_status: Option<bool>,
     stego_signer_hex: String,
+    stego_author_decoded: String,
+    stego_license_decoded: String,
+    stego_ts_decoded: u32,
     stego_last_msg: String,
     stego_decoded: Option<(String, String, usize, String)>,
     stego_decoded_preview: Option<egui::TextureHandle>,
@@ -214,6 +217,9 @@ impl FmAeroApp {
             stego_last_pubkey: String::new(),
             stego_sig_status: None,
             stego_signer_hex: String::new(),
+            stego_author_decoded: String::new(),
+            stego_license_decoded: String::new(),
+            stego_ts_decoded: 0,
             stego_last_msg: String::new(),
             stego_decoded: None,
             stego_decoded_preview: None,
@@ -701,6 +707,9 @@ impl FmAeroApp {
                     self.stego_last_msg = msg;
                     self.stego_decoded_preview_dirty = true;
                     self.stego_sig_status = r.signature_ok;
+                    self.stego_author_decoded = r.author.clone();
+                    self.stego_license_decoded = r.license.clone();
+                    self.stego_ts_decoded = r.timestamp;
                     self.stego_signer_hex = r.signer_pubkey.clone();
                     self.stego_decoded = Some((
                         out_name.clone(),
@@ -898,6 +907,10 @@ impl FmAeroApp {
             if !self.stego_last_pubkey.is_empty() {
                 ui.label(RichText::new(format!("Current pubkey: {}", &self.stego_last_pubkey[..16.min(self.stego_last_pubkey.len())]))
                     .weak());
+            }
+            if self.stego_signing_seed.trim().is_empty() {
+                ui.colored_label(Color32::from_rgb(255, 200, 100),
+                    RichText::new("Signing key empty -> metadata NOT protected by signature.").small());
             }
 
             ui.add_space(6.0);
@@ -1105,6 +1118,25 @@ impl FmAeroApp {
                 ui.label(RichText::new("SHA:").weak());
                 ui.label(RichText::new(sha_short).weak().monospace());
             });
+            if !self.stego_author_decoded.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Author:").weak());
+                    ui.label(RichText::new(&self.stego_author_decoded).strong());
+                });
+            }
+            if !self.stego_license_decoded.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("License:").weak());
+                    ui.label(RichText::new(&self.stego_license_decoded).strong());
+                });
+            }
+            if self.stego_ts_decoded > 0 {
+                let ts_str = crate::types::fmt_unix(self.stego_ts_decoded);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Timestamp:").weak());
+                    ui.label(RichText::new(ts_str).weak());
+                });
+            }
             if let Some(ok) = self.stego_sig_status {
                 let (txt, color) = if ok {
                     ("Signature: VALID", Color32::from_rgb(120, 220, 140))
