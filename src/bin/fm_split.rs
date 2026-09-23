@@ -56,6 +56,8 @@ fn main() -> Result<()> {
         nebula: false,
         frame_pattern: 0,
         sign_with_app_identity: false,
+        extra_signatures: Vec::new(),
+        tsa_block: None,
     };
     let f = encode_aeroflow(&payload, &opts)?;
     println!("Input: {} ({} B)", name, payload.len());

@@ -1,6 +1,6 @@
 [package]
 name = "fm_aero_code_2"
-version = "3.10.1"
+version = "3.11.3"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]
@@ -49,7 +49,12 @@ path = "src/bin/fm_stego.rs"
 name = "fm_selftest"
 path = "src/bin/fm_selftest.rs"
 
+[[bin]]
+name = "fm_sign"
+path = "src/bin/fm_sign.rs"
+
 [dependencies]
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image        = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 png          = "0.17"
 rustfft      = "6.2"
@@ -118,3 +123,8 @@ harness = false
 [[bench]]
 name = "encode_bench"
 harness = false
+
+
+[build-dependencies]
+hex = "0.4"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }

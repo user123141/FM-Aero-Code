@@ -250,6 +250,9 @@ pub fn decode_luma_with_multiplier(luma: &GrayImage, threshold_mult: f32) -> Res
 ///   1. FEC decode OK
 ///   2. Header parses as AeroHeader
 ///   3. page_crc matches body (if nonzero)
+
+
+
 pub fn decode_luma_multipass(luma: &GrayImage) -> Result<DecodedGlint> {
     let multipliers = [0.5, 0.4, 0.3, 0.22, 0.15];
     let mut last_err: Option<String> = None;
@@ -275,4 +278,57 @@ pub fn decode_luma_multipass(luma: &GrayImage) -> Result<DecodedGlint> {
         }
     }
     Err(anyhow!("all thresholds failed ({})", last_err.unwrap_or_else(|| "?".into())))
+}
+
+/// Sauvola adaptive local binarization. Excellent for uneven lighting.
+/// window: odd, typically 15-25. k: 0.2-0.5 (higher = more sensitive).
+pub fn sauvola_binarize(img: &GrayImage, window: u32, k: f32) -> GrayImage {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w == 0 || h == 0 { return img.clone(); }
+    let win = if window < 3 { 3 } else if window % 2 == 0 { window + 1 } else { window } as i32;
+    let half = win / 2;
+    // Integral images: sum and sum-of-squares
+    let mut s = vec![0u64; (w + 1) * (h + 1)];
+    let mut sq = vec![0u64; (w + 1) * (h + 1)];
+    for y in 0..h {
+        let mut row_s = 0u64;
+        let mut row_sq = 0u64;
+        for x in 0..w {
+            let v = img.get_pixel(x as u32, y as u32).0[0] as u64;
+            row_s += v;
+            row_sq += v * v;
+            s[(y + 1) * (w + 1) + (x + 1)] = s[y * (w + 1) + (x + 1)] + row_s;
+            sq[(y + 1) * (w + 1) + (x + 1)] = sq[y * (w + 1) + (x + 1)] + row_sq;
+        }
+    }
+    let rect_sum = |x0: i32, y0: i32, x1: i32, y1: i32, buf: &Vec<u64>| -> u64 {
+        let x0 = x0.max(0) as usize; let y0 = y0.max(0) as usize;
+        let x1 = x1.min(w as i32) as usize; let y1 = y1.min(h as i32) as usize;
+        let a = buf[y0 * (w + 1) + x0];
+        let b = buf[y0 * (w + 1) + x1];
+        let c = buf[y1 * (w + 1) + x0];
+        let d = buf[y1 * (w + 1) + x1];
+        d + a - b - c
+    };
+    let r: f32 = 128.0;
+    let mut out = GrayImage::new(w as u32, h as u32);
+    for y in 0..h {
+        for x in 0..w {
+            let x0 = x as i32 - half; let y0 = y as i32 - half;
+            let x1 = x as i32 + half + 1; let y1 = y as i32 + half + 1;
+            let area = (x1.min(w as i32) - x0.max(0)) * (y1.min(h as i32) - y0.max(0));
+            if area <= 0 { continue; }
+            let ssum = rect_sum(x0, y0, x1, y1, &s) as f64;
+            let ssq = rect_sum(x0, y0, x1, y1, &sq) as f64;
+            let n = area as f64;
+            let mean = ssum / n;
+            let var = (ssq / n) - mean * mean;
+            let std = if var > 0.0 { var.sqrt() } else { 0.0 };
+            let thr = mean * (1.0 + (k as f64) * (std / r as f64 - 1.0));
+            let v = img.get_pixel(x as u32, y as u32).0[0] as f64;
+            let px = if v > thr { 255u8 } else { 0u8 };
+            out.put_pixel(x as u32, y as u32, image::Luma([px]));
+        }
+    }
+    out
 }

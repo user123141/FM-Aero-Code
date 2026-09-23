@@ -83,6 +83,8 @@ pub struct EncodeOptions {
     pub nebula: bool,
     pub frame_pattern: u8,
     pub sign_with_app_identity: bool,
+    pub extra_signatures: Vec<crate::multisig::ExtraSignature>,
+    pub tsa_block: Option<crate::multisig::MultiSigBlock>,
 }
 
 impl Default for EncodeOptions {
@@ -110,6 +112,8 @@ impl Default for EncodeOptions {
             nebula: false,
             frame_pattern: 0,
             sign_with_app_identity: false,
+            extra_signatures: Vec::new(),
+            tsa_block: None,
         }
     }
 }
@@ -339,8 +343,16 @@ pub fn encode_payload(payload: &[u8], opts: &EncodeOptions) -> Result<EncodeOutc
     header = finalize_header(header, opts)?;
     header.page_crc = fnv32(&p.stream);
     header.checksum = header.compute_checksum();
-    let mut framed = Vec::with_capacity(AERO_HEADER_SIZE + p.stream.len());
+    // Multi-signature block (optional)
+    let mut ms_block = opts.tsa_block.clone().unwrap_or_default();
+    for s in opts.extra_signatures.iter() {
+        ms_block.signatures.push(s.clone());
+    }
+    let fmex_bytes = if !ms_block.is_empty() { ms_block.encode_block() } else { Vec::new() };
+
+    let mut framed = Vec::with_capacity(AERO_HEADER_SIZE + fmex_bytes.len() + p.stream.len());
     framed.extend_from_slice(&header.to_bytes());
+    framed.extend_from_slice(&fmex_bytes);
     framed.extend_from_slice(&p.stream);
     let image = encode_glint(&framed, opts, logo.as_ref())?;
 

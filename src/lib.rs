@@ -5,6 +5,12 @@
 //!
 //! Encodes any file into a printable black-and-white pattern.
 //! Uses FFT-based OFDM transport (AeroGlint Spectrum Protocol).
+//!
+//! Also provides:
+//!   - Steganography (LSB / DCT-QIM / DualB)
+//!   - Layered encoding (AeroGlint + Stego in one image)
+//!   - Per-install Ed25519 identity + root attestation
+//!   - Multi-signature blocks (FMEX)
 
 pub mod error;
 pub mod types;
@@ -19,6 +25,8 @@ pub mod decoder;
 pub mod steganography;
 pub mod layered;
 pub mod identity;
+pub mod trust;
+pub mod multisig;
 
 #[cfg(feature = "gui")]
 pub mod app;
@@ -27,9 +35,16 @@ pub mod icon;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+/// Build-time root attestation (populated by build.rs).
+/// If fm_root.key is present at build time, contains ROOT_PUBKEY + BUILD_TOKEN.
+/// Otherwise both are None (unauthorized / dev build).
+pub mod build_info {
+    include!(concat!(env!("OUT_DIR"), "/generated_build_token.rs"));
+}
+
 pub const FORMAT_VERSION: u8 = 2;
 pub const AUTHOR: &str = "Maksym Skorina";
-pub const VERSION: &str = "3.10.1";
+pub const VERSION: &str = "3.11.3";
 pub const PRODUCT_NAME: &str = "FM Aero Code 2";
 
 /// Hard cap on decompressed payload size (512 MiB).

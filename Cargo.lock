@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "fm_aero_code_2"
-version = "3.10.1"
+version = "3.11.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1210,6 +1210,7 @@ dependencies = [
  "num-complex",
  "png 0.17.16",
  "proptest",
+ "qrcode",
  "rand 0.8.8",
  "rayon",
  "reed-solomon",
@@ -2612,6 +2613,15 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+dependencies = [
+ "image",
+]
 
 [[package]]
 name = "quick-error"

@@ -38,18 +38,32 @@ fn recover_stream(luma: &GrayImage) -> Result<Vec<u8>> {
 }
 
 pub fn split_header_and_payload(stream: &[u8]) -> Result<(AeroHeader, Vec<u8>)> {
+    let (h, p, _ms) = split_header_payload_ms(stream)?;
+    Ok((h, p))
+}
+
+/// Like split_header_and_payload, but also returns multi-sig block if present.
+pub fn split_header_payload_ms(stream: &[u8]) -> Result<(AeroHeader, Vec<u8>, Option<crate::multisig::MultiSigBlock>)> {
     if stream.len() < AERO_HEADER_SIZE {
         return Err(anyhow!("stream too short ({} < {})", stream.len(), AERO_HEADER_SIZE));
     }
     let header = AeroHeader::from_bytes(&stream[..AERO_HEADER_SIZE])
         .ok_or_else(|| anyhow!("bad header"))?;
-    let payload_end = AERO_HEADER_SIZE + header.payload_size as usize;
+    let mut pos = AERO_HEADER_SIZE;
+    let mut ms = None;
+    if stream.len() >= pos + 4 && &stream[pos..pos+4] == &crate::multisig::FMEX_MAGIC {
+        if let Ok((block, consumed)) = crate::multisig::MultiSigBlock::decode_block(&stream[pos..]) {
+            ms = Some(block);
+            pos += consumed;
+        }
+    }
+    let payload_end = pos + header.payload_size as usize;
     let payload = if payload_end <= stream.len() {
-        stream[AERO_HEADER_SIZE..payload_end].to_vec()
+        stream[pos..payload_end].to_vec()
     } else {
-        stream[AERO_HEADER_SIZE..].to_vec()
+        stream[pos..].to_vec()
     };
-    Ok((header, payload))
+    Ok((header, payload, ms))
 }
 
 fn finish(header: &AeroHeader, stream: Vec<u8>, password: &str, verify_key: Option<&VerifyingKey>)
@@ -99,7 +113,7 @@ fn finish(header: &AeroHeader, stream: Vec<u8>, password: &str, verify_key: Opti
 }
 
 fn outcome(h: AeroHeader, s: Vec<u8>, pw: &str, vk: Option<&VerifyingKey>, recovered: bool,
-           recv: usize, total: usize) -> Result<DecodeOutcome>
+           recv: usize, total: usize, _ms: Option<crate::multisig::MultiSigBlock>) -> Result<DecodeOutcome>
 {
     let (payload, original_filename, hash_ok, signature_ok, hmac_ok) = finish(&h, s, pw, vk)?;
     let sha = sha256_short(&payload);
@@ -127,8 +141,8 @@ fn outcome(h: AeroHeader, s: Vec<u8>, pw: &str, vk: Option<&VerifyingKey>, recov
 
 pub fn decode_image(img: &GrayImage, password: &str, vk: Option<&VerifyingKey>) -> Result<DecodeOutcome> {
     let stream = recover_stream(img)?;
-    let (h, payload) = split_header_and_payload(&stream)?;
-    outcome(h, payload, password, vk, false, 1, 1)
+    let (h, payload, ms) = split_header_payload_ms(&stream)?;
+    outcome(h, payload, password, vk, false, 1, 1, ms)
 }
 
 pub fn decode_from_bytes(data: &[u8], password: &str, vk: Option<&VerifyingKey>) -> Result<DecodeOutcome> {
@@ -289,7 +303,7 @@ fn decode_frames_multi(frames: &[GrayImage], password: &str, _vk: Option<&Verify
     let declared = header.payload_size as usize;
     if declared > 0 && declared < combined.len() { combined.truncate(declared); }
 
-    outcome(header, combined, password, None, recovered_from_parity, received, total_pages as usize)
+    outcome(header, combined, password, None, recovered_from_parity, received, total_pages as usize, None)
 }
 
 pub fn peek_header_from_bytes(data: &[u8]) -> Result<AeroHeader> {
@@ -301,7 +315,7 @@ pub fn peek_header_from_bytes(data: &[u8]) -> Result<AeroHeader> {
 
 pub fn finish_from_stream(stream: &[u8], password: &str) -> Result<DecodeOutcome> {
     let (h, payload) = split_header_and_payload(stream)?;
-    outcome(h, payload, password, None, false, 1, 1)
+    outcome(h, payload, password, None, false, 1, 1, None)
 }
 
 pub fn decode_apng_streams(streams: &[Vec<u8>], password: &str) -> Result<DecodeOutcome> {
@@ -319,7 +333,7 @@ pub fn decode_apng_streams(streams: &[Vec<u8>], password: &str) -> Result<Decode
     let header = sample.unwrap();
     let declared = header.payload_size as usize;
     if declared > 0 && declared < combined.len() { combined.truncate(declared); }
-    outcome(header, combined, password, None, false, streams.len(), streams.len())
+    outcome(header, combined, password, None, false, streams.len(), streams.len(), None)
 }
 
 pub fn try_multi_recipient(

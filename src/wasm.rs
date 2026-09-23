@@ -38,6 +38,8 @@ fn base_opts(password: &str, filename: &str) -> EncodeOptions {
         nebula: false,
         frame_pattern: 0,
         sign_with_app_identity: false,
+        extra_signatures: Vec::new(),
+        tsa_block: None,
     }
 }
 

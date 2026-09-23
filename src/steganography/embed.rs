@@ -24,7 +24,7 @@ use crate::steganography::STEGO_MAGIC;
 
 const MIN_SIDE: u32 = 64;
 const ROBUST_IDX: [usize; 12] = [1, 8, 9, 2, 3, 10, 16, 17, 4, 11, 18, 24];
-const ROBUST_DELTA_SET: [f32; 4] = [18.0, 22.0, 26.0, 30.0];
+const ROBUST_DELTA_SET: [f32; 4] = [18.0, 24.0, 30.0, 36.0];
 const ROBUST_REFINE: usize = 8;
 
 const FIXED_HEADER_BYTES: usize = 218;

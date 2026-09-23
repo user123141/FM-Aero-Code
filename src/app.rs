@@ -127,6 +127,8 @@ pub struct FmAeroApp {
     stego_last_pubkey: String,
     stego_sig_status: Option<bool>,
     stego_signer_hex: String,
+    stego_official_build: bool,
+    qr_texture: Option<egui::TextureHandle>,
     stego_author_decoded: String,
     stego_license_decoded: String,
     stego_ts_decoded: u32,
@@ -217,6 +219,8 @@ impl FmAeroApp {
             stego_last_pubkey: String::new(),
             stego_sig_status: None,
             stego_signer_hex: String::new(),
+            stego_official_build: false,
+            qr_texture: None,
             stego_author_decoded: String::new(),
             stego_license_decoded: String::new(),
             stego_ts_decoded: 0,
@@ -317,6 +321,8 @@ impl FmAeroApp {
                 nebula: use_nebula,
                 frame_pattern,
                 sign_with_app_identity: true,
+                extra_signatures: Vec::new(),
+                tsa_block: None,
             };
             match encode_payload(&data, &opts) {
                 Ok(r) => {
@@ -708,6 +714,7 @@ impl FmAeroApp {
                     self.stego_last_msg = msg;
                     self.stego_decoded_preview_dirty = true;
                     self.stego_sig_status = r.signature_ok;
+                    self.stego_official_build = matches!(r.signature_ok, Some(true));
                     self.stego_author_decoded = r.author.clone();
                     self.stego_license_decoded = r.license.clone();
                     self.stego_ts_decoded = r.timestamp;
@@ -1139,7 +1146,11 @@ impl FmAeroApp {
                     ui.label(RichText::new(ts_str).weak());
                 });
             }
-            if let Some(ok) = self.stego_sig_status {
+            if self.stego_official_build {
+                        ui.colored_label(Color32::from_rgb(120, 220, 140),
+                            RichText::new("OFFICIAL Stego - Verified signature").strong());
+                    }
+                    if let Some(ok) = self.stego_sig_status {
                 let (txt, color) = if ok {
                     ("Signature: VALID", Color32::from_rgb(120, 220, 140))
                 } else {
@@ -1854,6 +1865,86 @@ impl FmAeroApp {
             }
             Tab::About => {
                 ui.heading("FM Aero Code 2");
+                if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.label(RichText::new("Identity").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Fingerprint:");
+                        let fp = id.fingerprint();
+                        ui.label(RichText::new(&fp).strong().monospace());
+                        if ui.small_button("Copy").clicked() {
+                            ui.output_mut(|o| o.copied_text = fp.clone());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Pubkey (base64):");
+                        let b64 = id.pubkey_b64();
+                        ui.label(RichText::new(&b64).weak().monospace());
+                        if ui.small_button("Copy").clicked() {
+                            ui.output_mut(|o| o.copied_text = b64.clone());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let attested = if id.attested { "OFFICIAL" } else { "UNOFFICIAL" };
+                        let color = if id.attested {
+                            Color32::from_rgb(120, 220, 140)
+                        } else {
+                            Color32::from_rgb(200, 180, 120)
+                        };
+                        ui.colored_label(color, RichText::new(format!("Status: {}", attested)).strong());
+                        if let Some(name) = id.attester_name.as_ref() {
+                            ui.label(RichText::new(format!("by {}", name)).weak());
+                        }
+                    });
+
+                    if self.qr_texture.is_none() {
+                        if let Ok(code) = qrcode::QrCode::new(id.pubkey_b64().as_bytes()) {
+                            let img = code.render::<image::Luma<u8>>()
+                                .min_dimensions(200, 200)
+                                .quiet_zone(true)
+                                .build();
+                            let (w, h) = (img.width() as usize, img.height() as usize);
+                            let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
+                            for p in img.pixels() {
+                                let v = p.0[0];
+                                pixels.extend_from_slice(&[v, v, v, 255]);
+                            }
+                            let ci = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+                            self.qr_texture = Some(ui.ctx().load_texture(
+                                "about_qr", ci, egui::TextureOptions::NEAREST));
+                        }
+                    }
+                    if let Some(tex) = self.qr_texture.as_ref() {
+                        ui.add_space(4.0);
+                        ui.add(egui::Image::new((tex.id(), egui::vec2(160.0, 160.0))));
+                        ui.label(RichText::new("Scan to share your public key").weak().small());
+                        ui.add_space(2.0);
+                        if ui.small_button("Export QR PNG...").clicked() {
+                            if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_file_name("fm_pubkey_qr.png")
+                                    .save_file() {
+                                    if let Ok(code) = qrcode::QrCode::new(id.pubkey_b64().as_bytes()) {
+                                        let img = code.render::<image::Luma<u8>>()
+                                            .min_dimensions(320, 320)
+                                            .quiet_zone(true)
+                                            .build();
+                                        if img.save(&path).is_ok() {
+                                            self.push(format!("saved {}", path.display()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if ui.small_button("Copy fingerprint").clicked() {
+                            if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+                                let fp = id.fingerprint();
+                                ui.output_mut(|o| o.copied_text = fp);
+                            }
+                        }
+                    }
+                }
                 ui.label(RichText::new(format!("Version {}", VERSION))
                     .color(Color32::from_rgb(120, 200, 255)));
                 ui.separator();
@@ -1919,6 +2010,86 @@ impl eframe::App for FmAeroApp {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("FM Aero Code 2");
+                if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.label(RichText::new("Identity").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Fingerprint:");
+                        let fp = id.fingerprint();
+                        ui.label(RichText::new(&fp).strong().monospace());
+                        if ui.small_button("Copy").clicked() {
+                            ui.output_mut(|o| o.copied_text = fp.clone());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Pubkey (base64):");
+                        let b64 = id.pubkey_b64();
+                        ui.label(RichText::new(&b64).weak().monospace());
+                        if ui.small_button("Copy").clicked() {
+                            ui.output_mut(|o| o.copied_text = b64.clone());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let attested = if id.attested { "OFFICIAL" } else { "UNOFFICIAL" };
+                        let color = if id.attested {
+                            Color32::from_rgb(120, 220, 140)
+                        } else {
+                            Color32::from_rgb(200, 180, 120)
+                        };
+                        ui.colored_label(color, RichText::new(format!("Status: {}", attested)).strong());
+                        if let Some(name) = id.attester_name.as_ref() {
+                            ui.label(RichText::new(format!("by {}", name)).weak());
+                        }
+                    });
+
+                    if self.qr_texture.is_none() {
+                        if let Ok(code) = qrcode::QrCode::new(id.pubkey_b64().as_bytes()) {
+                            let img = code.render::<image::Luma<u8>>()
+                                .min_dimensions(200, 200)
+                                .quiet_zone(true)
+                                .build();
+                            let (w, h) = (img.width() as usize, img.height() as usize);
+                            let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
+                            for p in img.pixels() {
+                                let v = p.0[0];
+                                pixels.extend_from_slice(&[v, v, v, 255]);
+                            }
+                            let ci = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+                            self.qr_texture = Some(ui.ctx().load_texture(
+                                "about_qr", ci, egui::TextureOptions::NEAREST));
+                        }
+                    }
+                    if let Some(tex) = self.qr_texture.as_ref() {
+                        ui.add_space(4.0);
+                        ui.add(egui::Image::new((tex.id(), egui::vec2(160.0, 160.0))));
+                        ui.label(RichText::new("Scan to share your public key").weak().small());
+                        ui.add_space(2.0);
+                        if ui.small_button("Export QR PNG...").clicked() {
+                            if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_file_name("fm_pubkey_qr.png")
+                                    .save_file() {
+                                    if let Ok(code) = qrcode::QrCode::new(id.pubkey_b64().as_bytes()) {
+                                        let img = code.render::<image::Luma<u8>>()
+                                            .min_dimensions(320, 320)
+                                            .quiet_zone(true)
+                                            .build();
+                                        if img.save(&path).is_ok() {
+                                            self.push(format!("saved {}", path.display()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if ui.small_button("Copy fingerprint").clicked() {
+                            if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+                                let fp = id.fingerprint();
+                                ui.output_mut(|o| o.copied_text = fp);
+                            }
+                        }
+                    }
+                }
                 ui.label(RichText::new(format!("v{}", VERSION))
                     .color(Color32::from_rgb(120, 200, 255)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
