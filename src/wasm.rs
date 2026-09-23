@@ -203,3 +203,48 @@ fn base64_encode(data: &[u8]) -> String {
     }
     out
 }
+
+#[wasm_bindgen]
+pub fn encode_payload_wasm_ex(data: &[u8], password: &str, filename: &str, resilience: bool) -> Vec<u8> {
+    let cipher = if password.is_empty() { CipherKind::None } else { CipherKind::SealV1 };
+    let opts = EncodeOptions {
+        cipher,
+        password: password.to_string(),
+        pad: true,
+        compression: CompressionMode::LosslessPriority,
+        original_name: filename.to_string(),
+        center_logo: None,
+        signing_key: None,
+        hmac_enabled: true,
+        auto_lossless_media: true,
+        recipient_key: None,
+        recipients: Vec::new(),
+        gps: None,
+        resilience,
+    };
+    let r = match crate::encoder::pipeline::encode_payload(data, &opts) {
+        Ok(r) => r,
+        Err(_) => {
+            // Fall back to aeroflow (multi-page)
+            match crate::encoder::pipeline::encode_aeroflow(data, &opts) {
+                Ok(f) => {
+                    let apng = match crate::encoder::apng::write_apng_to_vec(&f.frames, 4) {
+                        Ok(b) => b,
+                        Err(_) => return Vec::new(),
+                    };
+                    return apng;
+                }
+                Err(_) => return Vec::new(),
+            }
+        }
+    };
+    let mut png = Vec::new();
+    {
+        use image::ImageEncoder;
+        use image::codecs::png::PngEncoder;
+        if PngEncoder::new(&mut png)
+            .write_image(r.image.as_raw(), r.image.width(), r.image.height(),
+                image::ExtendedColorType::L8).is_err() { return Vec::new(); }
+    }
+    png
+}

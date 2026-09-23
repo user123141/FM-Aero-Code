@@ -187,6 +187,15 @@ impl AeroHeader {
         if h.compute_checksum() != cs { return None; }
         Some(h)
     }
+
+    /// Bytes that participate in HMAC and Ed25519 signature.
+    /// Zeroes volatile fields (hmac, reserved/timestamp, page_crc, padding)
+    /// so encoder (before HMAC set) and decoder (after HMAC set) agree.
+    pub fn hmac_input(&self) -> Vec<u8> {
+        let mut b = self.to_bytes();
+        for i in 94..128 { b[i] = 0; }
+        b
+    }
     pub fn created_at(&self) -> u32 {
         u32::from_le_bytes([self.reserved[0], self.reserved[1], self.reserved[2], self.reserved[3]])
     }

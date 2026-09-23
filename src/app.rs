@@ -72,6 +72,7 @@ pub struct FmAeroApp {
     decoded: Option<DecodedView>,
     zoom: f32,
     pan: Vec2,
+    preview_max_frames: usize,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
     signing_seed: [u8; 32],
@@ -116,6 +117,7 @@ impl FmAeroApp {
             decoded: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
+            preview_max_frames: 128,
             rx, tx,
             signing_seed: seed,
         }
@@ -342,19 +344,25 @@ impl FmAeroApp {
 
             ui.add_space(8.0);
             ui.separator();
-            ui.heading("Crypto");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.cipher, CipherKind::SealV1, "Seal v1");
-                ui.selectable_value(&mut self.cipher, CipherKind::SealV2, "Seal v2");
-                ui.selectable_value(&mut self.cipher, CipherKind::None, "None");
-            });
-            ui.label(RichText::new("Password").weak());
+            ui.heading("Security");
+            let mode_label = if self.use_recipient && !self.recipient_pub.is_empty() {
+                "AeroSeal v2 (recipient X25519)"
+            } else if !self.password.is_empty() {
+                "AeroSeal v1 (password symmetric)"
+            } else {
+                "None (no encryption)"
+            };
+            ui.label(RichText::new(format!("Mode: {}", mode_label)).color(Color32::from_rgb(120, 200, 255)));
+            ui.add_space(4.0);
+            ui.label(RichText::new("Password (for AeroSeal v1)").weak());
             ui.add(egui::TextEdit::singleline(&mut self.password)
-                .password(true).desired_width(f32::INFINITY));
-            ui.checkbox(&mut self.use_recipient, "Use recipient (X25519)");
+                .password(true).desired_width(f32::INFINITY)
+                .hint_text("empty = no encryption"));
+            ui.add_space(4.0);
+            ui.checkbox(&mut self.use_recipient, "Use recipient key (AeroSeal v2)");
             if self.use_recipient {
                 ui.add(egui::TextEdit::singleline(&mut self.recipient_pub)
-                    .hint_text("64 hex chars").desired_width(f32::INFINITY));
+                    .hint_text("64 hex chars X25519 public key").desired_width(f32::INFINITY));
             }
 
             ui.add_space(8.0);
@@ -471,6 +479,9 @@ impl FmAeroApp {
                             self.frame_index = (self.frame_index + 1) % previewing;
                         }
                         ui.checkbox(&mut self.autoplay, "Play");
+                        ui.separator();
+                        ui.label("Preview:");
+                        ui.add(egui::DragValue::new(&mut self.preview_max_frames).range(1..=512));
                     }
                 });
                 ui.separator();

@@ -55,8 +55,7 @@ fn finish(
 ) -> Result<(Vec<u8>, String, bool, bool, bool)> {
     let mut hmac_ok = true;
     if header.flags & HEADER_FLAG_HMAC != 0 && !password.is_empty() {
-        let mut raw = header.to_bytes();
-        for b in raw[94..110].iter_mut() { *b = 0; }
+        let raw = header.hmac_input();
         let mac = hmac_sha256(password.as_bytes(), &raw);
         hmac_ok = constant_time_eq(&mac[..16], &header.hmac);
     }
@@ -177,8 +176,6 @@ fn decode_frames_multi(frames: &[GrayImage], password: &str, _vk: Option<&Verify
     // Detect resilience mode: 250 total pages (200 data + 50 parity)
     let resilience_mode = total_pages == (crate::resilience::DATA_PAGES + crate::resilience::PARITY_PAGES) as u16;
 
-    let mut recovered_from_parity = false;
-
     if resilience_mode {
         // Try direct: need all 200 data pages present
         let data_present: Vec<(u16, Vec<u8>)> = pages.iter()
@@ -197,7 +194,6 @@ fn decode_frames_multi(frames: &[GrayImage], password: &str, _vk: Option<&Verify
                   data_present.len(), pages.len() - data_present.len());
         match recover_with_parity(&pages, total_pages) {
             Ok(streams) => {
-                recovered_from_parity = true;
                 let mut result = decode_apng_streams(&streams, password)?;
                 result.recovered_from_parity = true;
                 return Ok(result);

@@ -241,7 +241,7 @@ fn build_flags(opts: &EncodeOptions, p: &Prepared) -> u8 {
 
 fn finalize_header(mut h: AeroHeader, opts: &EncodeOptions) -> Result<AeroHeader> {
     if h.flags & HEADER_FLAG_HMAC != 0 {
-        let raw = h.to_bytes();
+        let raw = h.hmac_input();
         let mac = hmac_sha256(opts.password.as_bytes(), &raw);
         h.hmac.copy_from_slice(&mac[..16]);
         h.checksum = h.compute_checksum();
