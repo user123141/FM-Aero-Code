@@ -74,19 +74,27 @@ pub fn build_request(hash: &[u8; 32]) -> Vec<u8> {
 }
 
 pub fn request(hash: &[u8; 32], url: &str) -> Result<Vec<u8>> {
-    let body = build_request(hash);
-
-    // Try curl first (universal, no TLS trouble)
-    if let Ok(v) = try_curl(url, &body) {
-        return Ok(v);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (hash, url);
+        return Err(anyhow!("TSA HTTP not available in WASM (use CLI fm_sign tsa)"));
     }
-    // Fallback: ureq
-    match try_ureq(url, &body) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(anyhow!("TSA failed (curl + ureq): {}", e)),
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let body = build_request(hash);
+        // Try curl first (universal, no TLS trouble)
+        if let Ok(v) = try_curl(url, &body) {
+            return Ok(v);
+        }
+        // Fallback: ureq
+        match try_ureq(url, &body) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(anyhow!("TSA failed (curl + ureq): {}", e)),
+        }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn try_curl(url: &str, body: &[u8]) -> Result<Vec<u8>> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -117,6 +125,7 @@ fn try_curl(url: &str, body: &[u8]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn try_ureq(url: &str, body: &[u8]) -> Result<Vec<u8>> {
     use std::time::Duration;
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
@@ -133,6 +142,7 @@ fn try_ureq(url: &str, body: &[u8]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_opentimestamps(file_path: &str) -> Result<Option<String>> {
     use std::process::Command;
     let check = if cfg!(target_os = "windows") {
