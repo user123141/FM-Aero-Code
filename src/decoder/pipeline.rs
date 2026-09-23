@@ -189,11 +189,19 @@ fn decode_frames_multi(frames: &[GrayImage], password: &str, _vk: Option<&Verify
     let mut all_streams: Vec<(u16, Vec<u8>)> = Vec::with_capacity(total_pages as usize);
 
     for (g, group) in groups.iter().enumerate() {
-        // Check if all data slots present
-        let data_present: Vec<usize> = (0..data_pg).filter(|i| group.contains_key(i)).collect();
-        if data_present.len() == data_pg {
-            // Direct use
-            for slot in 0..data_pg {
+        // Compute how many DATA pages this group should contain.
+        // When no parity and it is the last group, it may be partial.
+        let expected_in_group = if par_pg == 0 {
+            let remaining = (total_pages as usize).saturating_sub(g * data_pg);
+            remaining.min(data_pg)
+        } else {
+            data_pg
+        };
+        let data_present: Vec<usize> = (0..expected_in_group)
+            .filter(|i| group.contains_key(i)).collect();
+        if data_present.len() == expected_in_group {
+            // Direct use (partial group handled correctly)
+            for slot in 0..expected_in_group {
                 let stream = group.get(&slot).unwrap().clone();
                 let idx = (g * group_size + slot) as u16;
                 all_streams.push((idx, stream));

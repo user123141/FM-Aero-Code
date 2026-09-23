@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use eframe::egui;
 use fm_aero_code_2::app::FmAeroApp;
 use fm_aero_code_2::icon::load_icon;
@@ -11,5 +13,9 @@ fn main() -> eframe::Result<()> {
             .with_icon(load_icon()),
         ..Default::default()
     };
-    eframe::run_native("FM Aero Code 2", opts, Box::new(|cc| Ok(Box::new(FmAeroApp::new(cc)))))
+    eframe::run_native(
+        "FM Aero Code 2",
+        opts,
+        Box::new(|cc| Ok(Box::new(FmAeroApp::new(cc)))),
+    )
 }
