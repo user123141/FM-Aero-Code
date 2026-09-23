@@ -78,6 +78,16 @@ fn median_amplitude(matrix: &[Complex32], size: usize) -> f32 {
     amps[amps.len() / 2]
 }
 
+fn median_data_amplitude(matrix: &[Complex32], size: usize) -> f32 {
+    let cells = data_cells(size);
+    let mut amps: Vec<f32> = cells.iter()
+        .map(|&(x, y)| matrix[y * size + x].norm())
+        .collect();
+    if amps.is_empty() { return 0.0; }
+    amps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    amps[amps.len() / 2]
+}
+
 fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
     let c = size as f32 / 2.0;
     let pilot_r = crate::encoder::aeroglint::PILOT_RADIUS_NORM * c;
@@ -157,7 +167,7 @@ pub fn decode_luma_with_multiplier(luma: &GrayImage, threshold_mult: f32) -> Res
         .collect();
     fft2d(&mut matrix, size);
 
-    let noise_floor = median_amplitude(&matrix, size);
+    let noise_floor = median_data_amplitude(&matrix, size);
     let threshold = noise_floor * threshold_mult;
 
     let mut rotation_rad = find_rotation(&matrix, size);

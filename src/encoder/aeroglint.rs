@@ -1,8 +1,10 @@
-//! AeroGlint encoder (v3.0.4).
+//! AeroGlint encoder (v3.1.0).
 //!
-//! Spectral camouflage: user photo occupies LOW frequencies (r < GUARD_INNER),
-//! data occupies MID frequencies. Both domains are disjoint, so photo is
-//! visible (blurred) but data integrity is preserved.
+//! Spectral camouflage: photo occupies LOW frequencies (r < GUARD_INNER),
+//! data occupies MID. Domains are disjoint so both survive.
+//!
+//! Photo scaling normalizes TOTAL ENERGY, not peak, so the photo is
+//! visible regardless of input dynamic range.
 
 use anyhow::{anyhow, Result};
 use image::{GrayImage, Luma, imageops::FilterType};
@@ -11,7 +13,7 @@ use rustfft::FftPlanner;
 
 use crate::AEROGLINT_GRID;
 
-pub const GUARD_INNER: f32 = 0.20;
+pub const GUARD_INNER: f32 = 0.28;
 pub const GUARD_OUTER: f32 = 0.78;
 pub const PILOT_RADIUS_NORM: f32 = 0.50;
 
@@ -22,7 +24,6 @@ pub const PILOT_ANGLES: [f32; 4] = [
     5.0 * std::f32::consts::PI / 6.0,
 ];
 
-// Softer pilots than v3.0.3 (were 8/7/6/5, too strong).
 pub const PILOT_VALUES: [Complex32; 4] = [
     Complex32::new(4.0, 0.0),
     Complex32::new(3.5, 0.0),
@@ -93,12 +94,10 @@ pub fn data_cells(size: usize) -> Vec<(usize, usize)> {
     out
 }
 
-/// Canonical half-plane cells inside low-frequency circle (r < GUARD_INNER).
-/// These cells are unused by data; photo spectrum lives here.
+/// Canonical (half-plane) cells inside low-frequency circle.
 fn photo_cells(size: usize) -> Vec<(usize, usize)> {
     let c = size as f32 / 2.0;
-    let inner_r = GUARD_INNER * c;
-    let inner_r_sq = inner_r * inner_r;
+    let inner_r_sq = (GUARD_INNER * c) * (GUARD_INNER * c);
     let mut out = Vec::new();
     for y in 0..size {
         for x in 0..size {
@@ -107,9 +106,7 @@ fn photo_cells(size: usize) -> Vec<(usize, usize)> {
             if (x > mx) || (x == mx && y > my) { continue; }
             let dx = x as f32 - c;
             let dy = y as f32 - c;
-            if dx * dx + dy * dy < inner_r_sq {
-                out.push((x, y));
-            }
+            if dx * dx + dy * dy < inner_r_sq { out.push((x, y)); }
         }
     }
     out
@@ -146,43 +143,46 @@ fn fft2d(matrix: &mut [Complex32], size: usize, inverse: bool) {
     }
 }
 
-/// Embed photo spectrum into low-frequency cells.
-/// Photo pixels are mean-subtracted, FFT'd, then low-freq cells are copied
-/// with a scale chosen so peak amplitude в‰€ 12.0 (strong enough to be visible
-/// after IFFT, but confined to frequencies data never touches).
-fn embed_photo_spectrum(matrix: &mut [Complex32], size: usize, photo: &GrayImage) {
-    let resized = image::imageops::resize(photo, size as u32, size as u32, FilterType::Triangle);
-
-    // Compute mean for DC removal (so photo doesn't shift the whole image)
+/// Build photo spectrum, then scale by total energy so photo RMS in the
+/// spatial domain matches the target (photo dominates visually).
+fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
+    let resized = image::imageops::resize(photo, size as u32, size as u32, FilterType::Lanczos3);
     let n = (size * size) as f32;
     let mut sum = 0.0f32;
     for p in resized.pixels() { sum += p.0[0] as f32; }
     let mean = sum / n;
-
-    let mut photo_matrix: Vec<Complex32> = resized.pixels()
+    let mut m: Vec<Complex32> = resized.pixels()
         .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
         .collect();
+    fft2d(&mut m, size, false);
 
-    fft2d(&mut photo_matrix, size, false);
-
-    let cells = photo_cells(size);
-    if cells.is_empty() { return; }
-
-    // Scale so max amplitude in low-freq band = 12.0
-    let mut max_amp = 1e-6f32;
-    for &(x, y) in &cells {
-        let a = photo_matrix[y * size + x].norm();
-        if a > max_amp { max_amp = a; }
+    // Zero everything outside low-freq band
+    let c = size as f32 / 2.0;
+    let inner_r_sq = (GUARD_INNER * c) * (GUARD_INNER * c);
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - c;
+            let dy = y as f32 - c;
+            if dx * dx + dy * dy >= inner_r_sq {
+                m[y * size + x] = Complex32::new(0.0, 0.0);
+            }
+        }
     }
-    let scale = 12.0 / max_amp;
 
-    for &(x, y) in &cells {
-        let v = photo_matrix[y * size + x] * scale;
-        set_hermitian(matrix, size, x, y, v);
-    }
+    // Compute total energy, scale to target.
+    let mut energy: f64 = 0.0;
+    for v in &m { let a = v.norm() as f64; energy += a * a; }
+
+    // Target spatial RMS for photo = 2.0. Parseval: sum|x|^2 = (1/N)*sum|X|^2.
+    // RMS = sqrt(sum|X|^2) / N. Want RMS=2.0 => sum|X|^2 = (2.0*N)^2.
+    let n_f = size as f64;
+    let target_energy = (2.0 * n_f) * (2.0 * n_f);
+    let scale = ((target_energy / energy.max(1e-6)).sqrt()) as f32;
+
+    for v in m.iter_mut() { *v = *v * scale; }
+    m
 }
 
-/// Simple thick frame, compact: 10 px per side.
 pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
     let w = inner.width();
     let h = inner.height();
@@ -240,12 +240,20 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, px, py, PILOT_VALUES[i]);
     }
 
-    // 2. Photo spectrum in low frequencies
+    // 2. Photo (low-freq band)
     if let Some(p) = photo {
-        embed_photo_spectrum(&mut matrix, size, p);
+        let ps = build_photo_spectrum(size, p);
+        for y in 0..size {
+            for x in 0..size {
+                let v = ps[y * size + x];
+                if v.norm() > 0.0 {
+                    set_hermitian(&mut matrix, size, x, y, v);
+                }
+            }
+        }
     }
 
-    // 3. QPSK data in mid frequencies
+    // 3. Data (mid-freq band)
     let total_bits = stream.len() * 8;
     let mut bits: Vec<u8> = Vec::with_capacity(total_bits);
     for i in 0..total_bits {
@@ -265,9 +273,7 @@ pub fn encode_stream(
         if bit_b >= perm.len() { break; }
         let src_a = perm[bit_a];
         let src_b = perm[bit_b];
-        if src_a >= bits.len() && src_b >= bits.len() {
-            continue;
-        }
+        if src_a >= bits.len() && src_b >= bits.len() { continue; }
         let b1 = if src_a < bits.len() { bits[src_a] } else { 0 };
         let b2 = if src_b < bits.len() { bits[src_b] } else { 0 };
         let re = if b1 == 1 { 1.0 } else { -1.0 };
@@ -275,26 +281,23 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
     }
 
-    // 4. IFFT
+    // 4. IFFT + normalize
     fft2d(&mut matrix, size, true);
-
-    // 5. Normalize real part to [0, 255]
-    let mut min_r = f32::INFINITY;
-    let mut max_r = f32::NEG_INFINITY;
-    for cell in &matrix {
-        let r = cell.re;
-        if r < min_r { min_r = r; }
-        if r > max_r { max_r = r; }
+    let mut mn = f32::INFINITY;
+    let mut mx = f32::NEG_INFINITY;
+    for c in &matrix {
+        let r = c.re;
+        if r < mn { mn = r; }
+        if r > mx { mx = r; }
     }
-    let range = (max_r - min_r).max(1e-6);
+    let range = (mx - mn).max(1e-6);
     let mut img = GrayImage::new(size as u32, size as u32);
     for y in 0..size {
         for x in 0..size {
             let r = matrix[y * size + x].re;
-            let norm = ((r - min_r) / range).clamp(0.0, 1.0);
+            let norm = ((r - mn) / range).clamp(0.0, 1.0);
             img.put_pixel(x as u32, y as u32, Luma([(norm * 255.0) as u8]));
         }
     }
-
     Ok(EncodedGlint { image: img, bytes_used: stream.len(), capacity_bytes })
 }

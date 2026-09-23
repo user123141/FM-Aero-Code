@@ -1,128 +1,139 @@
 # FM Aero Code 2
 
-**Fast Memory optical storage.** Encode any file into a printable black-and-white pattern that survives camera capture.
+Fast Memory optical storage. Encode any file into a printable black-and-white pattern that survives camera capture.
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.8.3-brightgreen)]()
-
----
+Version 3.1.0 | MIT License | Author: Maksym Skorina
 
 ## What it does
 
-FM Aero Code converts arbitrary bytes into a spectral pattern:
+FM Aero Code converts arbitrary bytes into a spectral pattern. Pipeline:
 
-```
-file bytes
-  -> AeroPack v20 (BWT + MTF + RLE + DPCM adaptive)
-  -> AeroSeal v1/v2 (XChaCha20-Poly1305 + Argon2id, optional)
-  -> Reed-Solomon RS(255, 223) FEC
-  -> PRNG bit interleaving
-  -> QPSK onto 128x128 FFT grid (Hermitian symmetric)
-  -> 2D IFFT -> grayscale image
-  -> PNG (single) or APNG (multi-page)
-```
+    file bytes
+      -> AeroPack v20 (BWT + MTF + RLE + DPCM3 + BCJ x86)
+      -> AeroSeal v1/v2 (XChaCha20-Poly1305 + Argon2id, optional)
+      -> Reed-Solomon RS(255, 223) FEC
+      -> Optional page-level RS resilience (5 levels, 0-50%)
+      -> PRNG bit interleaving (SplitMix64)
+      -> QPSK onto 128x128 FFT grid (Hermitian symmetric)
+      -> Optional photo in low-frequency cells (spectral camouflage)
+      -> 2D IFFT -> grayscale image
+      -> PNG (single) or APNG (multi-page)
 
-Decoder reverses the pipeline: FFT -> pilot-ring rotation detect -> QPSK -> de-interleave -> RS decode -> decrypt -> unpack.
+Decoder reverses: strip border -> FFT -> pilot-ring rotation -> QPSK demod
+(multipass threshold) -> de-interleave -> RS decode -> decrypt -> unpack.
 
 ## Features
 
-- **Any file type**: text, music, photos, video, executables, archives
-- **Bit-perfect round-trip**: verified by 9/9 self-tests + 10,000 property-based tests
-- **Configurable resilience**: 5 levels from 0% to 50% page-loss recovery
-- **Cross-platform**: native GUI (Windows/Linux/macOS) + WASM (browser)
-- **Offline**: pure local, no network required
-- **Spectral camouflage**: optional logo overlay in low frequencies
+- Any file type: text, music, photos, video, executables, archives
+- Bit-perfect round-trip: 9/9 self-tests + property-based tests
+- Configurable resilience: 0% / 5% / 10% / 25% / 50% page-loss recovery
+- Spectral camouflage: photo overlay in low-frequency spectrum
+- Cross-platform: native GUI (Windows / Linux / macOS) + WASM (browser)
+- Offline PWA: no network required
+- Print-ready: fm_split + print.html for A4 sheets
 
 ## Quick start
 
 Build native:
 
-```bash
-cargo build --release
-./target/release/fm_gui    # GUI
-./target/release/fm_selftest   # verify all round-trips
-```
+    cargo build --release
+    ./target/release/fm_gui
+    ./target/release/fm_selftest
 
 Build WASM (browser):
 
-```bash
-wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
-cd web && python -m http.server 8080
-```
+    wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+    cd web && python -m http.server 8080
 
 ## CLI
 
-```bash
-# Encode single-page
-fm_encode photo.jpg photo.aero.png --password mypass
+Encode single file:
 
-# Encode with 25% resilience (recover up to 50 lost pages per group)
-fm_split book.pdf ./pages --resilience 3
+    fm_encode photo.jpg photo.aero.png --password mypass
+    fm_encode file.bin file.aero.png --border
 
-# Decode
-fm_decode photo.aero.png restored.jpg --password mypass
+Encode multi-page with resilience:
 
-# Batch process folders
-fm_batch encode ./in ./out --password mypass --recursive --jobs 8
+    fm_split book.pdf ./pages --resilience 3   # 25% recovery
+    fm_split file.bin ./pages --resilience 4   # 50% recovery
 
-# Generate keypair
-fm_keygen write
-```
+Decode:
 
-## Project structure
+    fm_decode photo.aero.png restored.jpg --password mypass
+    fm_decode pattern.png out.jpg --secret <64_hex_chars>
 
-```
-src/
-  lib.rs                - crate root
-  error.rs              - error types
-  types.rs              - AeroHeader, DataType, ResilienceLevel
-  fec.rs                - Reed-Solomon wrapper
-  resilience.rs         - page-level RS (multi-level)
-  selftest.rs           - round-trip verification
-  crypto/               - AeroSeal v1/v2, Argon2id, Ed25519
-  encoder/              - AeroPack, AeroGlint FFT encoder
-  decoder/              - FFT decoder, QPSK, pilot detection
-  app.rs                - egui GUI
-  icon.rs               - application icon
-  wasm.rs               - WASM bindings
-  bin/                  - CLI tools
-web/
-  index.html            - scanner + encoder UI
-  print.html            - print pages to A4
-  sw.js                 - service worker (offline)
-  manifest.json         - PWA manifest
-tests/
-  property_tests.rs     - proptest (10,000 cases)
-benches/
-  aeropack_bench.rs     - criterion benchmarks
-```
+Batch process folders:
 
-## Security
+    fm_batch encode ./in ./out --password mypass --recursive --jobs 8
+    fm_batch decode ./patterns ./restored --recursive
 
-- Argon2id (32 MiB, t=3, p=2) - same parameters on all platforms
-- XChaCha20-Poly1305 (24-byte nonce) - encrypt-then-MAC
-- HMAC-SHA256 for header + payload integrity
-- Ed25519 optional signatures
-- `zeroize` scrubbing of key material
-- `#![forbid(unsafe_code)]`
+Generate keypair:
 
-See [SECURITY.md](SECURITY.md) for threat model.
+    fm_keygen write
 
 ## Resilience levels
 
-| Level | Data/Parity | Recovery | Size overhead |
-|-------|-------------|----------|---------------|
-| Off   | 200/0       | 0%       | +0%           |
-| Low   | 190/10      | 5%       | +5%           |
-| Balanced | 180/20   | 10%      | +11%          |
-| High  | 150/50      | 25%      | +33%          |
-| Extreme | 100/100   | 50%      | +100%         |
+| Level    | Data/Parity | Recovery | Overhead |
+|----------|-------------|----------|----------|
+| Off      | 200 / 0     | 0%       | +0%      |
+| Low      | 190 / 10    | 5%       | +5%      |
+| Balanced | 180 / 20    | 10%      | +11%     |
+| High     | 150 / 50    | 25%      | +33%     |
+| Extreme  | 100 / 100   | 50%      | +100%    |
+
+## Security
+
+- Argon2id (32 MiB, t=3, p=2) - identical on every platform
+- XChaCha20-Poly1305 (24-byte nonce) - encrypt-then-MAC
+- HMAC-SHA256 for header + payload integrity
+- Ed25519 signatures (optional)
+- zeroize scrubbing of key material
+- forbid(unsafe_code)
+
+See SECURITY.md for threat model.
+
+## Project structure
+
+    src/
+      lib.rs           crate root
+      error.rs         error types
+      types.rs         AeroHeader, DataType, ResilienceLevel
+      fec.rs           Reed-Solomon wrapper
+      resilience.rs    parameterized page-level RS
+      selftest.rs      round-trip verification
+      fastmem.rs       size caps, atomic writes
+      crypto/          AeroSeal v1/v2, Argon2id, Ed25519
+      encoder/         AeroPack, AeroGlint FFT encoder, APNG
+      decoder/         FFT decoder, QPSK, pilot detection
+      app.rs           egui GUI
+      icon.rs          application icon
+      wasm.rs          WASM bindings
+      bin/             CLI tools
+
+    web/
+      index.html       PWA scanner + encoder
+      print.html       print pages to A4
+      sw.js            service worker (offline cache)
+      manifest.json    PWA manifest
+
+    tests/
+      property_tests.rs    proptest (10,000 cases)
+
+    benches/
+      aeropack_bench.rs    criterion benchmarks
+
+## Technology
+
+| Layer       | Implementation |
+|-------------|----------------|
+| Compression | AeroPack v20 (adaptive BWT+MTF+RLE+DPCM3, BCJ x86) |
+| Transport   | 2D OFDM over FFT with QPSK, Hermitian symmetric |
+| Pilots      | 4 tones at 30/60/120/150 deg, radius 0.50 Nyquist |
+| Interleave  | SplitMix64 PRNG (fixed seed) |
+| FEC         | RS(255, 223) + page-level RS resilience |
+| Crypto      | XChaCha20-Poly1305, Argon2id, HMAC-SHA256, Ed25519, X25519 |
+| Camouflage  | Photo in low-freq spectrum (r < 0.28) |
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
-
----
-
-Author: Maksym Skorina
+MIT. See LICENSE.
