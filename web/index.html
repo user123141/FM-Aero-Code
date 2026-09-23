@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>FM Aero Code 2</title>
+<link rel="manifest" href="./manifest.json">
+<style>
+:root{
+  --glass:rgba(28,28,30,.62);
+  --glass-2:rgba(44,44,46,.68);
+  --border:rgba(255,255,255,.09);
+  --border-hi:rgba(255,255,255,.16);
+  --fg:#f2f2f7; --fg-2:#98989d; --fg-3:#636366;
+  --accent:#0a84ff; --accent-hi:#409cff;
+  --ok:#30d158; --warn:#ff9f0a; --err:#ff453a;
+  --st:env(safe-area-inset-top,0px);
+  --sb:env(safe-area-inset-bottom,0px);
+  --blur:saturate(180%) blur(28px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;color:var(--fg);
+  background:radial-gradient(1200px 800px at 50% -10%,#1a1a1e,#0a0a0c 70%);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,sans-serif;
+  overscroll-behavior:none;touch-action:manipulation;
+  -webkit-font-smoothing:antialiased}
+.app{position:fixed;inset:0;display:flex;flex-direction:column;
+  padding-top:var(--st);padding-bottom:var(--sb)}
+.tabs{display:flex;gap:4px;margin:12px 16px 0;padding:5px;
+  background:var(--glass);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+  border:1px solid var(--border);border-radius:16px;flex-shrink:0}
+.tab{flex:1;padding:11px 8px;text-align:center;font:600 13px inherit;
+  letter-spacing:-.01em;color:var(--fg-2);background:transparent;
+  border:0;border-radius:11px;cursor:pointer;transition:all .28s cubic-bezier(.2,.8,.2,1)}
+.tab.active{color:var(--fg);background:rgba(255,255,255,.1);
+  box-shadow:0 2px 8px rgba(0,0,0,.2),inset 0 1px 0 rgba(255,255,255,.08)}
+.view{flex:1;display:none;flex-direction:column;overflow:hidden;min-height:0}
+.view.active{display:flex}
+.stage{position:relative;flex:1;margin:12px 16px 0;border-radius:24px;
+  overflow:hidden;background:#000;border:1px solid var(--border);
+  box-shadow:0 20px 60px rgba(0,0,0,.5)}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#preview{position:absolute;bottom:16px;right:16px;width:100px;height:100px;
+  border-radius:16px;background:#000;z-index:8;display:none;image-rendering:pixelated;
+  border:2px solid rgba(255,255,255,.22);box-shadow:0 8px 24px rgba(0,0,0,.6)}
+.ar-frame{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:min(82vmin,500px);height:min(82vmin,500px);pointer-events:none;z-index:3}
+.ar-frame::before,.ar-frame::after{content:"";position:absolute;
+  width:34px;height:34px;border:2px solid rgba(255,255,255,.9);border-radius:6px;
+  transition:all .35s cubic-bezier(.2,.8,.2,1);
+  filter:drop-shadow(0 0 12px rgba(255,255,255,.55))}
+.ar-frame::before{top:0;left:0;border-right:0;border-bottom:0}
+.ar-frame::after{bottom:0;right:0;border-left:0;border-top:0}
+.ar-frame.hot::before,.ar-frame.hot::after{border-color:var(--ok);
+  filter:drop-shadow(0 0 20px var(--ok));width:42px;height:42px}
+.ar-frame.warm::before,.ar-frame.warm::after{border-color:var(--warn)}
+.ar-frame .crosshair{position:absolute;top:50%;left:50%;
+  transform:translate(-50%,-50%);width:64px;height:64px;border-radius:50%;
+  border:1px dashed rgba(255,255,255,.25);animation:reticle 4s linear infinite}
+.ar-frame .crosshair::before{content:"";position:absolute;top:50%;left:50%;
+  width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.75);
+  transform:translate(-50%,-50%);box-shadow:0 0 16px rgba(255,255,255,.6)}
+@keyframes reticle{to{transform:translate(-50%,-50%) rotate(360deg)}}
+.scanline{position:absolute;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent 0%,rgba(10,132,255,.65) 50%,transparent 100%);
+  box-shadow:0 0 20px 2px rgba(10,132,255,.55);
+  animation:scan 2.8s ease-in-out infinite;z-index:4;pointer-events:none}
+@keyframes scan{0%,100%{top:8%;opacity:.4}50%{top:92%;opacity:1}}
+.hud{position:absolute;top:16px;left:50%;transform:translateX(-50%);z-index:6;pointer-events:none}
+.pill{padding:9px 16px;border-radius:999px;background:var(--glass);
+  backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+  border:1px solid var(--border-hi);font:600 12px inherit;letter-spacing:-.01em;
+  white-space:nowrap;display:inline-flex;align-items:center;gap:8px;color:var(--fg);
+  box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);
+  box-shadow:0 0 10px var(--accent);animation:blink 1.8s ease-in-out infinite}
+.pill.ok .dot{background:var(--ok);box-shadow:0 0 12px var(--ok);animation:none}
+.pill.warn .dot{background:var(--warn);box-shadow:0 0 10px var(--warn)}
+.pill.err .dot{background:var(--err);box-shadow:0 0 10px var(--err);animation:none}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+.tb{display:flex;gap:10px;padding:14px 16px calc(14px + var(--sb));flex-shrink:0}
+.btn{flex:1;min-height:52px;font:600 14px inherit;letter-spacing:-.01em;
+  background:var(--glass-2);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+  color:var(--fg);border:1px solid var(--border-hi);border-radius:16px;
+  cursor:pointer;transition:transform .15s cubic-bezier(.2,.8,.2,1),background .2s;
+  box-shadow:0 4px 16px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.06)}
+.btn:active{transform:scale(.96);background:rgba(58,58,60,.9)}
+.btn.primary{background:linear-gradient(180deg,var(--accent-hi),var(--accent));
+  color:#fff;border:0;box-shadow:0 6px 20px rgba(10,132,255,.45),
+  inset 0 1px 0 rgba(255,255,255,.2)}
+.btn.icon{flex:0 0 52px;padding:0}
+.create-body{flex:1;overflow-y:auto;padding:16px;-webkit-overflow-scrolling:touch}
+.section{margin-bottom:22px}
+.section-label{font:600 11px inherit;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--fg-2);margin-bottom:10px;padding-left:4px}
+.field input,.field select,.field textarea{width:100%;background:var(--glass-2);
+  backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);color:var(--fg);
+  border:1px solid var(--border);border-radius:14px;padding:14px 16px;
+  font:500 15px inherit;letter-spacing:-.01em;outline:none;
+  transition:border-color .2s,box-shadow .2s;-webkit-appearance:none}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);
+  box-shadow:0 0 0 4px rgba(10,132,255,.16)}
+.field textarea{min-height:80px;resize:vertical;font-family:inherit}
+.drop-zone{border:1.5px dashed rgba(255,255,255,.18);border-radius:18px;
+  padding:32px 16px;text-align:center;color:var(--fg-2);cursor:pointer;
+  transition:all .25s cubic-bezier(.2,.8,.2,1);font-size:14px;
+  background:rgba(255,255,255,.02)}
+.drop-zone:hover,.drop-zone.dragover{border-color:var(--accent);
+  background:rgba(10,132,255,.06);color:var(--fg);transform:scale(1.01)}
+.drop-zone .plus{font-size:44px;font-weight:200;color:var(--accent);
+  line-height:1;margin-bottom:12px;filter:drop-shadow(0 0 20px rgba(10,132,255,.4))}
+.preview-area{margin-top:16px;text-align:center;padding:16px;
+  background:var(--glass);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+  border:1px solid var(--border);border-radius:18px}
+.preview-area img{max-width:100%;border-radius:12px;image-rendering:pixelated;
+  box-shadow:0 12px 40px rgba(0,0,0,.5)}
+.result-body{flex:1;overflow-y:auto;padding:16px;-webkit-overflow-scrolling:touch}
+.empty{text-align:center;color:var(--fg-2);padding-top:120px;font-size:15px;letter-spacing:-.01em}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:14px 16px;
+  border-bottom:1px solid var(--border);font:500 14px inherit}
+.kv:last-child{border-bottom:0}
+.kv .k{color:var(--fg-2);letter-spacing:-.01em}
+.kv .v{color:var(--fg);text-align:right;word-break:break-all;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5px}
+.toast{position:fixed;top:calc(var(--st) + 20px);left:50%;
+  transform:translateX(-50%) translateY(-160px);background:var(--glass);
+  backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+  border:1px solid var(--border-hi);border-radius:16px;padding:14px 22px;
+  font:600 14px inherit;letter-spacing:-.01em;z-index:200;
+  transition:transform .38s cubic-bezier(.2,.8,.2,1);max-width:92vw;
+  box-shadow:0 20px 60px rgba(0,0,0,.6);pointer-events:none;text-align:center}
+.toast.show{transform:translateX(-50%) translateY(0)}
+.toast.ok{border-color:rgba(48,209,88,.45)}
+.toast.err{border-color:rgba(255,69,58,.5);color:#ffb4ae}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-view="scan">Scan</button>
+    <button class="tab" data-view="create">Create</button>
+    <button class="tab" data-view="result">Result</button>
+  </div>
+  <div class="view active" id="view-scan">
+    <div class="stage">
+      <video id="v" playsinline autoplay muted></video>
+      <canvas id="c" style="display:none"></canvas>
+      <canvas id="preview"></canvas>
+      <div class="ar-frame" id="ar-frame"><div class="crosshair"></div></div>
+      <div class="scanline"></div>
+      <div class="hud"><span class="pill" id="status-pill"><span class="dot"></span><span id="status-text">Initializing</span></span></div>
+    </div>
+    <div class="tb">
+      <button class="btn icon" id="btn-flip">Flip</button>
+      <button class="btn icon" id="btn-light">Light</button>
+      <button class="btn primary" id="btn-capture">Capture</button>
+      <button class="btn icon" id="btn-reset">Reset</button>
+    </div>
+  </div>
+  <div class="view" id="view-create">
+    <div class="create-body">
+      <div class="section">
+        <div class="section-label">Source</div>
+        <div class="drop-zone" id="drop-zone">
+          <div class="plus">+</div>
+          <div>Tap or drop a file</div>
+          <div style="font-size:12px;margin-top:6px;color:var(--fg-3)" id="file-info">No file</div>
+        </div>
+        <input type="file" id="file-input" style="display:none">
+      </div>
+      <div class="section">
+        <div class="section-label">Or type</div>
+        <div class="field"><textarea id="text-input" placeholder="Message to embed"></textarea></div>
+      </div>
+      <div class="section">
+        <div class="section-label">Security</div>
+        <div class="field" style="margin-bottom:10px">
+          <input type="password" id="password" placeholder="Password (empty = no encryption)" autocomplete="off">
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-label">Mode</div>
+        <label style="display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--glass-2);border:1px solid var(--border);border-radius:14px;cursor:pointer">
+          <input type="checkbox" id="resilience" style="width:auto">
+          <span>Resilience mode (recover from lost pages)</span>
+        </label>
+      </div>
+      <div class="kv" id="create-status" style="display:none;border:0;padding:0;margin-top:12px"></div>
+      <div class="preview-area" id="preview-area" style="display:none"></div>
+    </div>
+    <div class="tb">
+      <button class="btn" id="btn-clear">Clear</button>
+      <button class="btn primary" id="btn-encode">Create</button>
+    </div>
+  </div>
+  <div class="view" id="view-result">
+    <div class="result-body" id="result-body"><div class="empty">Nothing yet</div></div>
+    <div class="tb" id="result-toolbar" style="display:none">
+      <button class="btn" id="btn-result-clear">Clear</button>
+      <button class="btn primary" id="btn-result-save">Save</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script type="module">
+import init, {
+  encode_payload_wasm, decode_payload_wasm,
+  WasmScanner, camera_constraints_json, wasm_version
+} from "./pkg/fm_aero_code_2.js";
+const $ = (id) => document.getElementById(id);
+const toast = (msg, kind) => {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast " + (kind || "");
+  t.classList.add("show");
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.classList.remove("show"), 2400);
+};
+let wasm_ready = false, currentStream = null, facingFront = false;
+let scanner = null, lastResult = null, selectedFile = null;
+async function initWasm() {
+  try {
+    await init();
+    wasm_ready = true;
+    $("status-text").textContent = "FM Aero Code " + wasm_version();
+    scanner = new WasmScanner();
+  } catch (e) {
+    $("status-text").textContent = "WASM failed";
+    toast("WASM: " + e.message, "err");
+  }
+}
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+    tab.classList.add("active");
+    $("view-" + tab.dataset.view).classList.add("active");
+  });
+});
+async function startCamera(front) {
+  if (currentStream) currentStream.getTracks().forEach((t) => t.stop());
+  const constraints = JSON.parse(camera_constraints_json(front));
+  try {
+    currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+    $("v").srcObject = currentStream;
+    $("status-text").textContent = "Live";
+  } catch (e) {
+    $("status-text").textContent = "No camera";
+    toast("Camera: " + e.message, "err");
+  }
+}
+$("btn-flip").onclick = () => { facingFront = !facingFront; startCamera(facingFront); };
+$("btn-light").onclick = async () => {
+  if (!currentStream) return;
+  const track = currentStream.getVideoTracks()[0];
+  try { await track.applyConstraints({ advanced: [{ torch: true }] }); }
+  catch { toast("No torch", "warn"); }
+};
+$("btn-reset").onclick = () => {
+  if (scanner) scanner.reset();
+  $("status-text").textContent = "Ready";
+  toast("Reset");
+};
+$("btn-capture").onclick = async () => {
+  if (!wasm_ready) return toast("WASM not ready", "err");
+  const v = $("v");
+  const canvas = $("c");
+  const size = 512;
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const s = Math.min(vw, vh);
+  const ox = (vw - s) / 2, oy = (vh - s) / 2;
+  ctx.drawImage(v, ox, oy, s, s, 0, 0, size, size);
+  const data = ctx.getImageData(0, 0, size, size).data;
+  const password = $("password").value;
+  const json = scanner.feed_frame(new Uint8Array(data), size, size, password);
+  try {
+    const r = JSON.parse(json);
+    if (r.ok) {
+      $("ar-frame").classList.add("hot");
+      setTimeout(() => $("ar-frame").classList.remove("hot"), 1200);
+      showResult(r);
+      $("status-text").textContent = "Decoded " + r.name;
+      toast("Decoded " + r.size + " B", "ok");
+    } else if (r.error) {
+      $("ar-frame").classList.add("warm");
+      setTimeout(() => $("ar-frame").classList.remove("warm"), 700);
+      $("status-text").textContent = "Try again";
+    }
+  } catch (e) { toast("Parse", "err"); }
+  const preview = $("preview");
+  preview.width = 100; preview.height = 100;
+  preview.getContext("2d").drawImage(canvas, 0, 0, 100, 100);
+  preview.style.display = "block";
+};
+$("drop-zone").onclick = () => $("file-input").click();
+$("file-input").onchange = (e) => {
+  selectedFile = e.target.files[0];
+  $("file-info").textContent = selectedFile ? selectedFile.name + " (" + selectedFile.size + " B)" : "No file";
+};
+["dragover","dragenter"].forEach((ev) =>
+  $("drop-zone").addEventListener(ev, (e) => { e.preventDefault(); $("drop-zone").classList.add("dragover"); }));
+["dragleave","drop"].forEach((ev) =>
+  $("drop-zone").addEventListener(ev, (e) => { e.preventDefault(); $("drop-zone").classList.remove("dragover"); }));
+$("drop-zone").addEventListener("drop", (e) => {
+  const f = e.dataTransfer.files[0];
+  if (f) { selectedFile = f; $("file-info").textContent = f.name + " (" + f.size + " B)"; }
+});
+$("btn-clear").onclick = () => {
+  selectedFile = null;
+  $("file-info").textContent = "No file";
+  $("text-input").value = "";
+  $("preview-area").style.display = "none";
+  $("create-status").style.display = "none";
+};
+$("btn-encode").onclick = async () => {
+  if (!wasm_ready) return toast("WASM not ready", "err");
+  let data, filename;
+  if (selectedFile) {
+    data = new Uint8Array(await selectedFile.arrayBuffer());
+    filename = selectedFile.name;
+  } else if ($("text-input").value) {
+    data = new TextEncoder().encode($("text-input").value);
+    filename = "message.txt";
+  } else { return toast("Pick a file or type text", "warn"); }
+  const password = $("password").value;
+  $("create-status").style.display = "block";
+  $("create-status").innerHTML = "<span class=k>Encoding</span><span class=v>" + data.length + " B</span>";
+  try {
+    const png = encode_payload_wasm(data, password, filename);
+    if (!png.length) { toast("Encode failed", "err"); return; }
+    const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
+    $("preview-area").style.display = "block";
+    $("preview-area").innerHTML = "<img src=" + url + " alt=pattern>";
+    $("create-status").innerHTML = "<span class=k>Ready</span><span class=v>" + data.length + " B -> " + png.length + " B PNG</span>";
+    lastResult = { png: png, name: filename.replace(/\.[^.]+$/, "") + ".aero2.png" };
+    toast("Pattern created", "ok");
+  } catch (e) { toast("Encode: " + e.message, "err"); }
+};
+function showResult(r) {
+  const bytes = atob(r.payload_b64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  lastResult = { ...r, bytes: arr, name: r.name || "decoded.bin" };
+  $("result-body").innerHTML =
+    "<div class=kv><span class=k>Name</span><span class=v>" + escapeHtml(r.name || "decoded.bin") + "</span></div>" +
+    "<div class=kv><span class=k>Type</span><span class=v>" + escapeHtml(r.type) + "</span></div>" +
+    "<div class=kv><span class=k>Size</span><span class=v>" + r.size + " B</span></div>" +
+    "<div class=kv><span class=k>SHA-256</span><span class=v>" + escapeHtml(r.sha) + "</span></div>";
+  $("result-toolbar").style.display = "flex";
+  document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+  document.querySelector("[data-view=result]").classList.add("active");
+  $("view-result").classList.add("active");
+}
+$("btn-result-clear").onclick = () => {
+  $("result-body").innerHTML = "<div class=empty>Nothing yet</div>";
+  $("result-toolbar").style.display = "none";
+  lastResult = null;
+};
+$("btn-result-save").onclick = () => {
+  if (!lastResult) return;
+  const blob = lastResult.bytes
+    ? new Blob([lastResult.bytes])
+    : new Blob([lastResult.png], { type: "image/png" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = lastResult.name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 200);
+};
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+initWasm().then(() => startCamera(false));
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>

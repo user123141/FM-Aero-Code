@@ -1,0 +1,107 @@
+[package]
+name = "fm_aero_code_2"
+version = "2.7.0"
+edition = "2021"
+license = "MIT"
+authors = ["Maksym Skorina"]
+description = "FM Aero Code 2 - Fast Memory optical storage via AeroGlint Spectrum"
+repository = "https://github.com/user123141/FM-Aero-Code"
+default-run = "fm_gui"
+
+[lib]
+name = "fm_aero_code_2"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "fm_gui"
+path = "src/bin/fm_gui.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "fm_encode"
+path = "src/bin/fm_encode.rs"
+
+[[bin]]
+name = "fm_decode"
+path = "src/bin/fm_decode.rs"
+
+[[bin]]
+name = "fm_keygen"
+path = "src/bin/fm_keygen.rs"
+
+[[bin]]
+name = "fm_batch"
+path = "src/bin/fm_batch.rs"
+
+[[bin]]
+name = "fm_split"
+path = "src/bin/fm_split.rs"
+
+[[bin]]
+name = "fm_selftest"
+path = "src/bin/fm_selftest.rs"
+
+[dependencies]
+image        = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+png          = "0.17"
+rustfft      = "6.2"
+num-complex  = "0.4"
+anyhow       = "1.0"
+chacha20poly1305 = "0.10"
+argon2       = "0.5"
+rand         = { version = "0.8", features = ["getrandom"] }
+sha2         = "0.10"
+hmac         = "0.12"
+hex          = "0.4"
+base64       = "0.22"
+zeroize      = "1.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek  = { version = "2", features = ["static_secrets", "getrandom"] }
+getrandom    = { version = "0.2", features = ["js"] }
+walkdir      = "2.5"
+reed-solomon = "0.2"
+reed-solomon-erasure = "6.0"
+webbrowser = "1"
+eframe       = { version = "0.29", optional = true, default-features = false, features = ["default_fonts", "glow"] }
+rfd          = { version = "0.15", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys       = { version = "0.3", optional = true }
+web-sys      = { version = "0.3", optional = true, features = ["Window", "Document", "HtmlVideoElement", "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "MediaDevices", "MediaStream", "MediaStreamConstraints", "Navigator"] }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.10"
+miniz_oxide = "0.8"
+zstd = "0.13"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+instant = { version = "0.1", features = ["wasm-bindgen"] }
+ruzstd = "0.7"
+
+[features]
+default = ["gui"]
+gui = ["eframe", "rfd"]
+wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook"]
+
+[profile.release]
+opt-level = 3
+codegen-units = 4
+lto = "thin"
+strip = "symbols"
+
+[profile.release-wasm]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5"
+
+[[bench]]
+name = "aeropack_bench"
+harness = false

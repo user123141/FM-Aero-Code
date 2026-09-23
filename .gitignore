@@ -1,0 +1,14 @@
+/target
+*.pdb
+.DS_Store
+Thumbs.db
+*.log
+.env
+.vercel
+node_modules
+fm_recipients.json
+FM.ps1
+*.bak
+old_backup_*
+.backup_*/
+*.backup_*

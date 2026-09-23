@@ -1,0 +1,375 @@
+use anyhow::{anyhow, Result};
+use ed25519_dalek::SigningKey;
+
+use crate::crypto::{CipherKind, content_hash_8, hmac_sha256, seal, seal2, sign_header, SealMode};
+use crate::encoder::aeroglint::encode_stream;
+use crate::encoder::compressor::{aero_pack, aero_pack_lossless, aero_unpack, classify, DataProfile};
+use crate::fastmem::assert_size;
+use crate::types::{
+    AeroHeader, CompressionKind, DataType, AERO_HEADER_SIZE,
+    HEADER_FLAG_HMAC, HEADER_FLAG_MULTIPAGE, HEADER_FLAG_NAMED, HEADER_FLAG_PADDED,
+    HEADER_FLAG_SIGNED,
+};
+use crate::MAX_COMPRESSED_BYTES;
+
+const FILENAME_MAX_LEN: usize = 200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionMode { Auto, Lossless, LosslessPriority }
+impl Default for CompressionMode { fn default() -> Self { Self::LosslessPriority } }
+impl CompressionMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (AeroPack v19)",
+            Self::Lossless => "Lossless (bit-perfect)",
+            Self::LosslessPriority => "Lossless Priority (media-aware)",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EncodeOptions {
+    pub cipher: CipherKind,
+    pub password: String,
+    pub pad: bool,
+    pub compression: CompressionMode,
+    pub original_name: String,
+    pub center_logo: Option<Vec<u8>>,
+    pub signing_key: Option<SigningKey>,
+    pub hmac_enabled: bool,
+    pub auto_lossless_media: bool,
+    pub recipient_key: Option<String>,
+    pub recipients: Vec<String>,
+    pub gps: Option<(f64, f64)>,
+    pub resilience: bool,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self {
+            cipher: CipherKind::SealV1,
+            password: String::new(),
+            pad: true,
+            compression: CompressionMode::LosslessPriority,
+            original_name: String::new(),
+            center_logo: None,
+            signing_key: None,
+            hmac_enabled: true,
+            auto_lossless_media: true,
+            recipient_key: None,
+            recipients: Vec::new(),
+            gps: None,
+            resilience: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct EncodeOutcome {
+    pub image: image::GrayImage,
+    pub payload_bytes: usize,
+    pub compressed_bytes: usize,
+    pub data_type: DataType,
+    pub cipher: CipherKind,
+    pub content_hash: String,
+    pub profile: DataProfile,
+    pub ratio: f64,
+}
+
+#[derive(Clone)]
+pub struct FlowOutcome {
+    pub frames: Vec<image::GrayImage>,
+    pub page_count: usize,
+    pub payload_bytes: usize,
+    pub compressed_bytes: usize,
+    pub data_type: DataType,
+    pub cipher: CipherKind,
+    pub content_hash: String,
+    pub profile: DataProfile,
+    pub resilience_enabled: bool,
+}
+
+struct Prepared {
+    stream: Vec<u8>,
+    effective_size: usize,
+    content_hash: [u8; 8],
+    data_type: DataType,
+    profile: DataProfile,
+    cipher: CipherKind,
+    has_name: bool,
+    used_lossless: bool,
+    padded: bool,
+}
+
+fn is_already_compressed(data: &[u8]) -> bool {
+    if data.len() < 8 { return false; }
+    matches!(DataType::detect(data),
+        DataType::Audio | DataType::Image | DataType::Video | DataType::Archive)
+}
+
+fn with_filename(payload: &[u8], name: &str) -> (Vec<u8>, bool) {
+    if name.is_empty() { return (payload.to_vec(), false); }
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(FILENAME_MAX_LEN);
+    let mut out = Vec::with_capacity(1 + len + payload.len());
+    out.push(len as u8);
+    out.extend_from_slice(&bytes[..len]);
+    out.extend_from_slice(payload);
+    (out, true)
+}
+
+pub fn strip_filename(payload: &[u8]) -> Option<(String, Vec<u8>)> {
+    if payload.is_empty() { return None; }
+    let n = payload[0] as usize;
+    if payload.len() < 1 + n { return None; }
+    let name = String::from_utf8_lossy(&payload[1..1 + n]).to_string();
+    Some((name, payload[1 + n..].to_vec()))
+}
+
+fn prepare(payload: &[u8], opts: &EncodeOptions) -> Result<Prepared> {
+    assert_size(payload.len(), MAX_COMPRESSED_BYTES)?;
+
+    let data_type = DataType::detect(payload);
+    let class = classify(payload);
+    let already = is_already_compressed(payload);
+    let effective_mode = match opts.compression {
+        CompressionMode::LosslessPriority => if already { CompressionMode::Lossless } else { CompressionMode::Auto },
+        CompressionMode::Auto if opts.auto_lossless_media && already => CompressionMode::Lossless,
+        m => m,
+    };
+
+    let profile = if data_type.is_media() || matches!(data_type, DataType::Archive) {
+        DataProfile::from_class(class)
+    } else {
+        crate::encoder::compressor::analyze(payload)
+    };
+
+    let cipher = if opts.password.is_empty() && opts.recipient_key.is_none() && opts.recipients.is_empty() {
+        CipherKind::None
+    } else if !opts.recipients.is_empty() || opts.recipient_key.is_some() {
+        CipherKind::SealV2
+    } else {
+        CipherKind::SealV1
+    };
+
+    let content_hash = content_hash_8(payload);
+    let (with_meta, has_name) = with_filename(payload, &opts.original_name);
+    let mut framed = with_meta;
+    let effective_size = framed.len();
+
+    let do_pad = opts.pad && effective_mode != CompressionMode::Lossless;
+    if do_pad {
+        const P: usize = 16;
+        let rem = framed.len() % P;
+        if rem != 0 { framed.resize(framed.len() + P - rem, 0u8); }
+    }
+    let padded = do_pad;
+
+    let (pack_data, used_lossless) = match effective_mode {
+        CompressionMode::Auto => {
+            let packed = aero_pack(&framed)?.data;
+            match aero_unpack(&packed) {
+                Ok(unpacked) if unpacked == framed => (packed, false),
+                _ => (aero_pack_lossless(&framed)?.data, true),
+            }
+        }
+        CompressionMode::Lossless => (aero_pack_lossless(&framed)?.data, true),
+        CompressionMode::LosslessPriority => unreachable!(),
+    };
+
+    if !opts.recipients.is_empty() {
+        let mut pubs = Vec::new();
+        for h in &opts.recipients {
+            if let Ok(b) = hex::decode(h.trim()) {
+                if b.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&b);
+                    pubs.push(x25519_dalek::PublicKey::from(arr));
+                }
+            }
+        }
+        if !pubs.is_empty() {
+            let blob = seal2::seal_v2_multi(&pubs, &pack_data, SealMode::Padded)?;
+            return Ok(Prepared {
+                stream: blob, effective_size, content_hash, data_type, profile,
+                cipher: CipherKind::SealV2, has_name, used_lossless, padded,
+            });
+        }
+    }
+    if let Some(pk_hex) = &opts.recipient_key {
+        if let Ok(pk_bytes) = hex::decode(pk_hex.trim()) {
+            if pk_bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&pk_bytes);
+                let pub_key = x25519_dalek::PublicKey::from(arr);
+                let blob = seal2::seal_v2(&pub_key, &pack_data, SealMode::Padded)?;
+                return Ok(Prepared {
+                    stream: blob, effective_size, content_hash, data_type, profile,
+                    cipher: CipherKind::SealV2, has_name, used_lossless, padded,
+                });
+            }
+        }
+    }
+    let stream = match cipher {
+        CipherKind::None => pack_data,
+        CipherKind::SealV1 => {
+            let mode = if opts.pad { SealMode::Padded } else { SealMode::Plain };
+            seal(&opts.password, &pack_data, mode)?
+        }
+        CipherKind::SealV2 => unreachable!(),
+    };
+    Ok(Prepared {
+        stream, effective_size, content_hash, data_type, profile,
+        cipher, has_name, used_lossless, padded,
+    })
+}
+
+fn load_logo(bytes: &[u8]) -> Option<image::GrayImage> {
+    image::load_from_memory(bytes).ok().map(|img| img.to_luma8())
+}
+
+fn build_flags(opts: &EncodeOptions, p: &Prepared) -> u8 {
+    let mut f = 0u8;
+    if p.padded { f |= HEADER_FLAG_PADDED; }
+    if p.has_name { f |= HEADER_FLAG_NAMED; }
+    if opts.signing_key.is_some() { f |= HEADER_FLAG_SIGNED; }
+    if opts.hmac_enabled && (!opts.password.is_empty() || p.cipher == CipherKind::SealV2) {
+        f |= HEADER_FLAG_HMAC;
+    }
+    f
+}
+
+fn finalize_header(mut h: AeroHeader, opts: &EncodeOptions) -> Result<AeroHeader> {
+    if h.flags & HEADER_FLAG_HMAC != 0 {
+        let raw = h.to_bytes();
+        let mac = hmac_sha256(opts.password.as_bytes(), &raw);
+        h.hmac.copy_from_slice(&mac[..16]);
+        h.checksum = h.compute_checksum();
+    }
+    if let Some(sk) = &opts.signing_key {
+        let mut raw = h.to_bytes();
+        for b in raw[30..94].iter_mut() { *b = 0; }
+        h.signature = sign_header(sk, &raw);
+        h.checksum = h.compute_checksum();
+    }
+    Ok(h)
+}
+
+fn emit_page(
+    chunk: &[u8],
+    page_index: u16,
+    page_total: u16,
+    p: &Prepared,
+    opts: &EncodeOptions,
+    flags: u8,
+    logo: Option<&image::GrayImage>,
+) -> Result<image::GrayImage> {
+    let mut header = AeroHeader::with_page(
+        p.data_type, CompressionKind::AeroPack, p.cipher, flags,
+        p.effective_size as u32, p.stream.len() as u32,
+        page_index, page_total, p.content_hash,
+    );
+    header = finalize_header(header, opts)?;
+    header.page_crc = crate::types::fnv32(chunk);
+    header.checksum = header.compute_checksum();
+    let mut framed = Vec::with_capacity(AERO_HEADER_SIZE + chunk.len());
+    framed.extend_from_slice(&header.to_bytes());
+    framed.extend_from_slice(chunk);
+    let with_fec = crate::fec::encode(&framed)?;
+    let glint = encode_stream(&with_fec, logo)?;
+    Ok(glint.image)
+}
+
+pub fn encode_payload(payload: &[u8], opts: &EncodeOptions) -> Result<EncodeOutcome> {
+    let p = prepare(payload, opts)?;
+    let flags = build_flags(opts, &p);
+    let logo = opts.center_logo.as_deref().and_then(load_logo);
+    let img = emit_page(&p.stream, 0, 1, &p, opts, flags, logo.as_ref())?;
+    let ratio = if !p.stream.is_empty() { payload.len() as f64 / p.stream.len() as f64 } else { 1.0 };
+    Ok(EncodeOutcome {
+        image: img,
+        payload_bytes: payload.len(),
+        compressed_bytes: p.stream.len(),
+        data_type: p.data_type,
+        cipher: p.cipher,
+        content_hash: hex::encode(p.content_hash),
+        profile: p.profile,
+        ratio,
+    })
+}
+
+pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutcome> {
+    let p = prepare(payload, opts)?;
+    const FEC_SAFE_LIMIT: usize = 800;
+    let max_blocks = FEC_SAFE_LIMIT / 255;
+    if max_blocks == 0 { return Err(anyhow!("capacity too small")); }
+    let max_framed = max_blocks * 223;
+    let chunk_data_size = max_framed.saturating_sub(AERO_HEADER_SIZE);
+    if chunk_data_size == 0 { return Err(anyhow!("capacity too small")); }
+    let data_page_count = ((p.stream.len() + chunk_data_size - 1) / chunk_data_size).max(1);
+    if data_page_count > 200 && opts.resilience {
+        return Err(anyhow!("resilience mode supports max 200 data pages; got {}", data_page_count));
+    }
+    if data_page_count > u16::MAX as usize { return Err(anyhow!("too many pages")); }
+
+    let flags = build_flags(opts, &p) | HEADER_FLAG_MULTIPAGE;
+    let logo = opts.center_logo.as_deref().and_then(load_logo);
+
+    // Collect data chunks
+    let mut chunks: Vec<&[u8]> = Vec::with_capacity(data_page_count);
+    for i in 0..data_page_count {
+        let start = i * chunk_data_size;
+        let end = (start + chunk_data_size).min(p.stream.len());
+        chunks.push(&p.stream[start..end]);
+    }
+
+    let total_pages = if opts.resilience {
+        (crate::resilience::DATA_PAGES + crate::resilience::PARITY_PAGES) as u16
+    } else {
+        data_page_count as u16
+    };
+
+    let mut frames: Vec<image::GrayImage> = Vec::with_capacity(total_pages as usize);
+
+    // Emit data pages
+    for (i, chunk) in chunks.iter().enumerate() {
+        let img = emit_page(chunk, i as u16, total_pages, &p, opts, flags, logo.as_ref())?;
+        frames.push(img);
+    }
+
+    // Emit parity pages if resilience
+    if opts.resilience {
+        use crate::resilience::{DATA_PAGES, PARITY_PAGES, add_parity};
+        let shard_size = chunks.iter().map(|c| c.len()).max().unwrap_or(0);
+        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(DATA_PAGES);
+        for i in 0..DATA_PAGES {
+            let mut sh = vec![0u8; shard_size];
+            if i < chunks.len() {
+                let n = chunks[i].len().min(shard_size);
+                sh[..n].copy_from_slice(&chunks[i][..n]);
+            }
+            shards.push(sh);
+        }
+        let parity = add_parity(&shards)?;
+        if parity.len() != PARITY_PAGES {
+            return Err(anyhow!("expected {} parity pages, got {}", PARITY_PAGES, parity.len()));
+        }
+        for (i, par) in parity.iter().enumerate() {
+            let idx = (DATA_PAGES + i) as u16;
+            let img = emit_page(par, idx, total_pages, &p, opts, flags, logo.as_ref())?;
+            frames.push(img);
+        }
+    }
+
+    Ok(FlowOutcome {
+        frames,
+        page_count: total_pages as usize,
+        payload_bytes: payload.len(),
+        compressed_bytes: p.stream.len(),
+        data_type: p.data_type,
+        cipher: p.cipher,
+        content_hash: hex::encode(p.content_hash),
+        profile: p.profile,
+        resilience_enabled: opts.resilience,
+    })
+}
