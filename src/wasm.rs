@@ -265,5 +265,30 @@ pub fn stego_embed_wasm(carrier_png: &[u8], payload: &[u8], password: &str) -> V
 #[wasm_bindgen]
 pub fn stego_extract_wasm(stego_png: &[u8], password: &str) -> Vec<u8> {
     let Ok(img) = image::load_from_memory(stego_png) else { return Vec::new(); };
-    crate::steganography::extract(&img, password).unwrap_or_default()
+    match crate::steganography::extract(&img, password) {
+        Ok(r) => r.payload,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Extract + return JSON metadata {ok, name, size, sha, cipher, payload_b64}.
+#[wasm_bindgen]
+pub fn stego_extract_wasm_ex(stego_png: &[u8], password: &str) -> String {
+    let Ok(img) = image::load_from_memory(stego_png) else {
+        return "{\"ok\":false,\"error\":\"image decode\"}".into();
+    };
+    match crate::steganography::extract(&img, password) {
+        Ok(r) => {
+            let b64 = base64_encode(&r.payload);
+            format!(
+                "{{\"ok\":true,\"name\":\"{}\",\"size\":{},\"sha\":\"{}\",\"cipher\":\"{}\",\"payload_b64\":\"{}\"}}",
+                json_escape(&r.name),
+                r.payload.len(),
+                r.content_hash,
+                r.cipher.label(),
+                b64,
+            )
+        }
+        Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(&e.to_string())),
+    }
 }

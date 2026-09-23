@@ -12,6 +12,7 @@ use crate::decoder::pipeline::{decode_from_bytes, peek_header_from_bytes};
 use crate::encoder::apng::write_apng_to_vec;
 use crate::encoder::pipeline::{encode_aeroflow, encode_payload, CompressionMode, EncodeOptions};
 use crate::settings::Settings;
+use crate::steganography::StegoMode;
 use crate::types::DataType;
 use crate::VERSION;
 
@@ -112,6 +113,7 @@ pub struct FmAeroApp {
     use_nebula: bool,
     frame_pattern: u8,
     stego_carrier: Option<Vec<u8>>,
+    stego_mode: StegoMode,
     stego_carrier_name: String,
     stego_payload: Option<Vec<u8>>,
     stego_payload_name: String,
@@ -120,6 +122,7 @@ pub struct FmAeroApp {
     stego_extract_src_name: String,
     stego_text: String,
     stego_last_msg: String,
+    stego_decoded: Option<(String, String, usize, String)>,
     stego_preview_tex: Option<egui::TextureHandle>,
     stego_carrier_tex: Option<egui::TextureHandle>,
     stego_preview_dirty: bool,
@@ -189,6 +192,7 @@ impl FmAeroApp {
             use_nebula: false,
             frame_pattern: 0,
             stego_carrier: None,
+            stego_mode: StegoMode::BitPerfect,
             stego_carrier_name: String::new(),
             stego_payload: None,
             stego_payload_name: String::new(),
@@ -197,6 +201,7 @@ impl FmAeroApp {
             stego_extract_src_name: String::new(),
             stego_text: String::new(),
             stego_last_msg: String::new(),
+            stego_decoded: None,
             stego_preview_tex: None,
             stego_carrier_tex: None,
             stego_preview_dirty: false,
@@ -595,6 +600,7 @@ impl FmAeroApp {
                 let opts = crate::steganography::StegoOptions {
                     password: password.clone(),
                     original_name: name.clone(),
+                    mode: self.stego_mode,
                 };
                 match crate::steganography::embed(&carrier, &payload, &opts) {
                     Ok(out) => {
@@ -609,11 +615,14 @@ impl FmAeroApp {
                         }
                         let pct = 100.0 * out.fec_bytes as f64 / out.capacity_bytes as f64;
                         let msg = format!(
-                            "Stego OK in {:.3}s: {}x{} | payload {} B -> stream {} B / cap {} B ({:.1}%)",
-                            elapsed, w, h, out.payload_bytes, out.fec_bytes, out.capacity_bytes, pct);
+                            "Stego OK ({}) in {:.3}s: {}x{} | payload {} B -> stream {} B / cap {} B ({:.1}%)",
+                            out.mode.short(), elapsed, w, h, out.payload_bytes, out.fec_bytes, out.capacity_bytes, pct);
                         self.push(msg.clone());
                         self.stego_last_msg = msg;
-                        self.stego_output = Some((png, "stego.png".to_string()));
+                        let stem = std::path::Path::new(&self.stego_carrier_name)
+                            .file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+                        let out_name = format!("stego_{}.png", stem);
+                        self.stego_output = Some((png, out_name));
                         self.stego_preview_dirty = true;
                     }
                     Err(e) => self.push(format!("stego error: {}", e)),
@@ -625,37 +634,58 @@ impl FmAeroApp {
 
     fn stego_decode(&mut self) {
         // Priority: explicit extract src > saved stego output > carrier
-        let (src_bytes, src_label) = if let Some(s) = self.stego_extract_src.clone() {
-            (s, self.stego_extract_src_name.clone())
+        let (src_bytes, src_label, from_explicit) = if let Some(s) = self.stego_extract_src.clone() {
+            (s, format!("user selection ({})", self.stego_extract_src_name), true)
         } else if let Some((bytes, _)) = self.stego_output.clone() {
             if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
-                (bytes, "last embedded output".to_string())
+                (bytes, "last embedded output (in RAM)".to_string(), false)
             } else if let Some(c) = self.stego_carrier.clone() {
-                (c, self.stego_carrier_name.clone())
+                (c, format!("carrier ({})", self.stego_carrier_name), false)
             } else {
                 self.push("stego: no image to extract from"); return;
             }
         } else if let Some(c) = self.stego_carrier.clone() {
-            (c, self.stego_carrier_name.clone())
+            (c, format!("carrier ({})", self.stego_carrier_name), false)
         } else {
             self.push("stego: no image to extract from"); return;
         };
         let password = if self.use_encryption && !self.password.is_empty() {
             self.password.clone()
         } else { String::new() };
-        self.push(format!("Extracting payload from {}...", src_label));
+        self.push(format!("Extracting from: {}", src_label));
         let t0 = Instant::now();
         match image::load_from_memory(&src_bytes) {
             Ok(img) => match crate::steganography::extract(&img, &password) {
-                Ok(payload) => {
+                Ok(r) => {
                     let elapsed = t0.elapsed().as_secs_f32();
-                    let name = format!("extracted_{}.bin", payload.len());
-                    let msg = format!("Extracted {} B in {:.3}s", payload.len(), elapsed);
+                    let kind = crate::types::DataType::detect(&r.payload);
+                    let out_name = if r.name.is_empty() {
+                        format!("extracted_{}.bin", r.payload.len())
+                    } else {
+                        r.name.clone()
+                    };
+                    let msg = format!("Extracted {} B in {:.3}s | type={} cipher={} sha={}",
+                        r.payload.len(), elapsed, kind.label(), r.cipher.label(), r.content_hash);
                     self.push(msg.clone());
                     self.stego_last_msg = msg;
-                    self.stego_output = Some((payload, name));
+                    self.stego_decoded = Some((
+                        out_name.clone(),
+                        kind.label().to_string(),
+                        r.payload.len(),
+                        r.content_hash.clone(),
+                    ));
+                    self.stego_output = Some((r.payload, out_name));
                 }
-                Err(e) => self.push(format!("extract error: {}", e)),
+                Err(e) => {
+                    let hint = if from_explicit && e.to_string().contains("no FMS1 magic") {
+                        " (this file has no embedded data - try the last output above)"
+                    } else if e.to_string().contains("no FMS1 magic") {
+                        " (this carrier has no embedded data)"
+                    } else {
+                        ""
+                    };
+                    self.push(format!("extract error: {}{}", e, hint));
+                }
             },
             Err(e) => self.push(format!("image decode: {}", e)),
         }
@@ -683,6 +713,7 @@ impl FmAeroApp {
         let opts = crate::steganography::StegoOptions {
             password: password.clone(),
             original_name: name,
+            mode: self.stego_mode,
         };
         let out = match crate::steganography::embed(&carrier, &payload, &opts) {
             Ok(o) => o,
@@ -690,7 +721,7 @@ impl FmAeroApp {
         };
         let dyn_img = image::DynamicImage::ImageRgb8(out.image.clone());
         let extracted = match crate::steganography::extract(&dyn_img, &password) {
-            Ok(e) => e,
+            Ok(r) => r.payload,
             Err(e) => { self.push(format!("test: extract failed: {}", e)); return; }
         };
         let elapsed = t0.elapsed().as_secs_f32();
@@ -707,6 +738,24 @@ impl FmAeroApp {
             ui.add_space(6.0);
             ui.heading("Steganography");
             ui.label(RichText::new("Hide data inside a normal photo. Photo looks unchanged.").weak());
+            ui.add_space(6.0);
+            ui.separator();
+
+            // Mode toggle
+            ui.label(RichText::new("Stego mode").strong());
+            ui.horizontal(|ui| {
+                let w = (ui.available_width() - 8.0) / 2.0;
+                let bp = ui.add_sized([w, 32.0],
+                    egui::SelectableLabel::new(self.stego_mode == StegoMode::BitPerfect, "Bit-perfect"));
+                if bp.clicked() { self.stego_mode = StegoMode::BitPerfect; }
+                let rb = ui.add_sized([w, 32.0],
+                    egui::SelectableLabel::new(self.stego_mode == StegoMode::Robust, "Robust"));
+                if rb.clicked() { self.stego_mode = StegoMode::Robust; }
+            });
+            ui.label(RichText::new(match self.stego_mode {
+                StegoMode::BitPerfect => "PNG-only, 100% bit-perfect, max capacity.",
+                StegoMode::Robust => "Survives JPEG q>=85, less capacity, tiny artifacts.",
+            }).weak());
             ui.add_space(6.0);
             ui.separator();
 
@@ -774,7 +823,7 @@ impl FmAeroApp {
 
             if let Some(c) = self.stego_carrier.as_ref() {
                 if let Ok(img) = image::load_from_memory(c) {
-                    let cap = crate::steganography::capacity_bytes(img.width(), img.height());
+                    let cap = crate::steganography::capacity_bytes_for(img.width(), img.height(), self.stego_mode);
                     let payload_len = self.stego_payload.as_ref().map(|p| p.len())
                         .unwrap_or_else(|| self.stego_text.len());
                     let est = payload_len * 255 / 223 + 32;
@@ -830,6 +879,11 @@ impl FmAeroApp {
                     self.stego_extract_src = None;
                     self.stego_extract_src_name.clear();
                 }
+                if self.stego_output.is_some() && ui.small_button("Use last output").clicked() {
+                    self.stego_extract_src = None;
+                    self.stego_extract_src_name.clear();
+                    self.push("extract source: last embedded output (in RAM)");
+                }
             });
             if !self.stego_extract_src_name.is_empty() {
                 ui.label(RichText::new(format!("source: {}", self.stego_extract_src_name)).weak());
@@ -875,7 +929,7 @@ impl FmAeroApp {
                     let ci = egui::ColorImage::from_rgba_unmultiplied(
                         [w as usize, h as usize], rgba.as_raw());
                     self.stego_carrier_tex = Some(ui.ctx().load_texture(
-                        "stego_carrier", ci, egui::TextureOptions::LINEAR));
+                        "stego_carrier", ci, egui::TextureOptions::NEAREST));
                 }
             }
         }
@@ -888,7 +942,7 @@ impl FmAeroApp {
                         let ci = egui::ColorImage::from_rgba_unmultiplied(
                             [w as usize, h as usize], rgba.as_raw());
                         self.stego_preview_tex = Some(ui.ctx().load_texture(
-                            "stego_preview", ci, egui::TextureOptions::LINEAR));
+                            "stego_preview", ci, egui::TextureOptions::NEAREST));
                         self.stego_preview_dirty = false;
                     }
                 }
@@ -931,6 +985,17 @@ impl FmAeroApp {
                 }
             });
         });
+
+        if let Some((name, kind, size, sha)) = self.stego_decoded.as_ref() {
+            ui.add_space(10.0);
+            ui.separator();
+            ui.label(RichText::new("Decoded payload").strong());
+            ui.label(format!("Name: {}", name));
+            ui.label(format!("Type: {}", kind));
+            ui.label(format!("Size: {} B", size));
+            let sha_short = if sha.len() >= 16 { &sha[..16] } else { sha };
+            ui.label(RichText::new(format!("SHA: {}", sha_short)).weak());
+        }
 
         if !self.stego_last_msg.is_empty() {
             ui.add_space(10.0);
@@ -1326,7 +1391,25 @@ impl FmAeroApp {
                             ui.add_space(6.0);
                             ui.separator();
 
-                            ui.heading("Carrier photo");
+                            // Mode toggle
+            ui.label(RichText::new("Stego mode").strong());
+            ui.horizontal(|ui| {
+                let w = (ui.available_width() - 8.0) / 2.0;
+                let bp = ui.add_sized([w, 32.0],
+                    egui::SelectableLabel::new(self.stego_mode == StegoMode::BitPerfect, "Bit-perfect"));
+                if bp.clicked() { self.stego_mode = StegoMode::BitPerfect; }
+                let rb = ui.add_sized([w, 32.0],
+                    egui::SelectableLabel::new(self.stego_mode == StegoMode::Robust, "Robust"));
+                if rb.clicked() { self.stego_mode = StegoMode::Robust; }
+            });
+            ui.label(RichText::new(match self.stego_mode {
+                StegoMode::BitPerfect => "PNG-only, 100% bit-perfect, max capacity.",
+                StegoMode::Robust => "Survives JPEG q>=85, less capacity, tiny artifacts.",
+            }).weak());
+            ui.add_space(6.0);
+            ui.separator();
+
+            ui.heading("Carrier photo");
                             ui.horizontal(|ui| {
                                 if ui.button("Load photo").clicked() {
                                     if let Some(p) = rfd::FileDialog::new()
@@ -1390,7 +1473,7 @@ impl FmAeroApp {
 
                             if let Some(c) = self.stego_carrier.as_ref() {
                                 if let Ok(img) = image::load_from_memory(c) {
-                                    let cap = crate::steganography::capacity_bytes(img.width(), img.height());
+                                    let cap = crate::steganography::capacity_bytes_for(img.width(), img.height(), self.stego_mode);
                                     let payload_len = self.stego_payload.as_ref().map(|p| p.len())
                                         .unwrap_or_else(|| self.stego_text.len());
                                     let est = payload_len * 255 / 223 + 32;
@@ -1497,7 +1580,7 @@ impl FmAeroApp {
                                         let ci = egui::ColorImage::from_rgba_unmultiplied(
                                             [w as usize, h as usize], rgba.as_raw());
                                         self.stego_carrier_tex = Some(ui.ctx().load_texture(
-                                            "stego_carrier", ci, egui::TextureOptions::LINEAR));
+                                            "stego_carrier", ci, egui::TextureOptions::NEAREST));
                                     }
                                 }
                             }
@@ -1511,7 +1594,7 @@ impl FmAeroApp {
                                             let ci = egui::ColorImage::from_rgba_unmultiplied(
                                                 [w as usize, h as usize], rgba.as_raw());
                                             self.stego_preview_tex = Some(ui.ctx().load_texture(
-                                                "stego_preview", ci, egui::TextureOptions::LINEAR));
+                                                "stego_preview", ci, egui::TextureOptions::NEAREST));
                                             self.stego_preview_dirty = false;
                                         }
                                     }

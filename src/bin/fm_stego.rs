@@ -28,13 +28,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Parse optional --password
+    // Parse optional flags
     let mut password = String::new();
+    let mut use_robust = false;
     let mut i = 2;
     while i < a.len() {
         if a[i] == "--password" && i + 1 < a.len() {
             password = a[i + 1].clone();
             i += 2;
+        } else if a[i] == "--robust" {
+            use_robust = true;
+            i += 1;
         } else { i += 1; }
     }
 
@@ -48,6 +52,7 @@ fn main() -> Result<()> {
             let opts = StegoOptions {
                 password: password.clone(),
                 original_name: name.clone(),
+                mode: if use_robust { fm_aero_code_2::steganography::StegoMode::Robust } else { fm_aero_code_2::steganography::StegoMode::BitPerfect },
             };
             let r = embed(&carrier, &payload, &opts)?;
             r.image.save(&a[4])?;
@@ -62,9 +67,12 @@ fn main() -> Result<()> {
         "extract" => {
             if a.len() < 4 { return Err(anyhow!("extract needs stego and out")); }
             let stego = image::open(&a[2])?;
-            let payload = extract(&stego, &password)?;
-            std::fs::write(&a[3], &payload)?;
-            println!("Extracted {} B -> {}", payload.len(), a[3]);
+            let r = extract(&stego, &password)?;
+            std::fs::write(&a[3], &r.payload)?;
+            println!("Extracted {} B -> {}", r.payload.len(), a[3]);
+            if !r.name.is_empty() { println!("Original name: {}", r.name); }
+            println!("Cipher: {}", r.cipher.label());
+            println!("SHA: {}", r.content_hash);
             Ok(())
         }
         _ => Err(anyhow!("unknown command: {}", cmd)),

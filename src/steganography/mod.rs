@@ -15,7 +15,7 @@
 pub mod dct;
 pub mod embed;
 
-pub use embed::{embed, extract, capacity_bytes, StegoOptions, StegoOutcome};
+pub use embed::{embed, extract, capacity_bytes, capacity_bytes_for, StegoMode, StegoOptions, StegoOutcome, StegoExtract};
 
 /// Magic prefix for the stego payload stream (after FEC + optional seal).
-pub const STEGO_MAGIC: [u8; 4] = *b"FMS1";
+pub const STEGO_MAGIC: [u8; 4] = *b"FMS2";

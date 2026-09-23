@@ -1,6 +1,6 @@
 [package]
 name = "fm_aero_code_2"
-version = "3.8.2"
+version = "3.8.6"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]

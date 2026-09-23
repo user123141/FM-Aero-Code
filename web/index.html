@@ -64,6 +64,9 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
   width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.75);
   transform:translate(-50%,-50%);box-shadow:0 0 16px rgba(255,255,255,.6)}
 @keyframes reticle{to{transform:translate(-50%,-50%) rotate(360deg)}}
+.ar-frame.hot{animation:hotPulse .55s ease-out}
+@keyframes hotPulse{0%{transform:translate(-50%,-50%) scale(1)}50%{transform:translate(-50%,-50%) scale(1.08)}100%{transform:translate(-50%,-50%) scale(1)}}
+.ar-frame.hot::before,.ar-frame.hot::after{box-shadow:0 0 32px 4px var(--ok)}
 .scanline{position:absolute;left:0;right:0;height:2px;
   background:linear-gradient(90deg,transparent 0%,rgba(10,132,255,.65) 50%,transparent 100%);
   box-shadow:0 0 20px 2px rgba(10,132,255,.55);
@@ -261,25 +264,20 @@ $("btn-light").onclick = async () => {
   try { await track.applyConstraints({ advanced: [{ torch: true }] }); }
   catch { toast("No torch", "warn"); }
 };
-$("btn-auto").onclick = () => {
-  if (autoInterval) {
-    clearInterval(autoInterval); autoInterval = null;
-    $("btn-auto").classList.remove("primary");
-    toast("Auto OFF");
-  } else {
-    $("btn-auto").classList.add("primary");
-    toast("Auto ON");
-    autoInterval = setInterval(() => { try { $("btn-capture").click(); } catch (e) {} }, 900);
-  }
-};
+
 $("btn-reset").onclick = () => {
   if (scanner) scanner.reset();
   $("status-text").textContent = "Ready";
   toast("Reset");
 };
-$("btn-capture").onclick = async () => {
-  if (!wasm_ready) return toast("WASM not ready", "err");
+let continuousScan = false;
+let lastDecode = 0;
+let hitStreak = 0;
+
+async function captureOnce(silent) {
+  if (!wasm_ready) return false;
   const v = $("v");
+  if (!v.videoWidth) return false;
   const canvas = $("c");
   const size = 512;
   canvas.width = size; canvas.height = size;
@@ -291,25 +289,57 @@ $("btn-capture").onclick = async () => {
   const data = ctx.getImageData(0, 0, size, size).data;
   const password = $("password").value;
   const json = scanner.feed_frame(new Uint8Array(data), size, size, password);
+  let decoded = false;
   try {
     const r = JSON.parse(json);
     if (r.ok) {
-      $("ar-frame").classList.add("hot");
-      setTimeout(() => $("ar-frame").classList.remove("hot"), 1200);
-      showResult(r);
-      $("status-text").textContent = "Decoded " + r.name;
-      toast("Decoded " + r.size + " B", "ok");
+      decoded = true;
+      hitStreak++;
+      if (hitStreak >= 1) {
+        $("ar-frame").classList.add("hot");
+        setTimeout(() => $("ar-frame").classList.remove("hot"), 1400);
+        showResult(r);
+        $("status-text").textContent = "Decoded " + (r.name || "payload");
+        if (!silent) toast("Decoded " + r.size + " B", "ok");
+        continuousScan = false;
+        $("btn-auto").classList.remove("primary");
+        hitStreak = 0;
+      }
     } else if (r.error) {
-      $("ar-frame").classList.add("warm");
-      setTimeout(() => $("ar-frame").classList.remove("warm"), 700);
-      $("status-text").textContent = "Try again";
+      hitStreak = 0;
+      if (!silent) {
+        $("ar-frame").classList.add("warm");
+        setTimeout(() => $("ar-frame").classList.remove("warm"), 500);
+      }
+    } else if (r.partial) {
+      $("status-text").textContent = "Scanning " + r.received + "/" + r.total;
     }
-  } catch (e) { toast("Parse", "err"); }
-  const preview = $("preview");
-  preview.width = 100; preview.height = 100;
-  preview.getContext("2d").drawImage(canvas, 0, 0, 100, 100);
-  preview.style.display = "block";
-};
+  } catch (e) {}
+  if (!silent || decoded) {
+    const preview = $("preview");
+    preview.width = 100; preview.height = 100;
+    preview.getContext("2d").drawImage(canvas, 0, 0, 100, 100);
+    preview.style.display = "block";
+  }
+  return decoded;
+}
+
+async function continuousScanTick() {
+  if (!continuousScan) return;
+  const now = performance.now();
+  if (now - lastDecode >= 250) {
+    lastDecode = now;
+    try { await captureOnce(true); } catch (e) {}
+  }
+  requestAnimationFrame(continuousScanTick);
+}
+
+$("btn-capture").onclick = async () => { await captureOnce(false); };
+
+
+
+// Auto-start scanning when camera is live
+setTimeout(() => { try { $("btn-auto").click(); } catch (e) {} }, 1500);
 $("drop-zone").onclick = () => $("file-input").click();
 $("file-input").onchange = (e) => {
   selectedFile = e.target.files[0];
