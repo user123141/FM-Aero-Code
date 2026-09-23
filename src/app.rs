@@ -316,6 +316,7 @@ impl FmAeroApp {
                 star_density,
                 nebula: use_nebula,
                 frame_pattern,
+                sign_with_app_identity: true,
             };
             match encode_payload(&data, &opts) {
                 Ok(r) => {

@@ -55,6 +55,7 @@ fn main() -> Result<()> {
         star_density: 60,
         nebula: false,
         frame_pattern: 0,
+        sign_with_app_identity: false,
     };
     let f = encode_aeroflow(&payload, &opts)?;
     println!("Input: {} ({} B)", name, payload.len());

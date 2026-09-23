@@ -29,6 +29,7 @@ pub struct DecodeOutcome {
     pub recovered_from_parity: bool,
     pub pages_received: usize,
     pub pages_total: usize,
+    pub app_signature_ok: Option<bool>,
 }
 
 fn recover_stream(luma: &GrayImage) -> Result<Vec<u8>> {
@@ -73,9 +74,9 @@ fn finish(header: &AeroHeader, stream: Vec<u8>, password: &str, verify_key: Opti
     let decrypted = match header.cipher {
         CipherKind::None => stream,
         CipherKind::SealV1 => {
-            if password.is_empty() { return Err(anyhow!("password required")); }
+            if password.is_empty() { return Err(anyhow!("password required (this pattern is encrypted)")); }
             crate::crypto::seal::open(password, &stream)
-                .map_err(|_| anyhow!("wrong password or corrupted"))?
+                .map_err(|_| anyhow!("wrong password (or file corrupted)"))?
         }
         CipherKind::SealV2 => {
             return Err(anyhow!("SealV2 needs recipient key"));
@@ -103,11 +104,24 @@ fn outcome(h: AeroHeader, s: Vec<u8>, pw: &str, vk: Option<&VerifyingKey>, recov
     let (payload, original_filename, hash_ok, signature_ok, hmac_ok) = finish(&h, s, pw, vk)?;
     let sha = sha256_short(&payload);
     let created = { let s = h.created_at_str(); if s == "unknown" { None } else { Some(s) } };
+    let app_signature_ok = if h.flags & crate::types::HEADER_FLAG_APP_SIGNED != 0 {
+        match crate::identity::AppIdentity::load_or_create() {
+            Ok(id) => {
+                let msg = crate::identity::app_signed_message(
+                    &h.content_hash, h.original_size, h.created_at());
+                Some(id.verify_with_own(&msg, &h.signature))
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     Ok(DecodeOutcome {
         payload, header: h, sha256: sha, hash_ok, signature_ok, hmac_ok,
         original_filename, created_at: created,
         recovered_from_parity: recovered,
         pages_received: recv, pages_total: total,
+        app_signature_ok,
     })
 }
 
@@ -337,6 +351,7 @@ pub fn try_multi_recipient(
         signature_ok: true, hmac_ok: true,
         original_filename: fname, created_at: created,
         recovered_from_parity: false, pages_received: 1, pages_total: 1,
+        app_signature_ok: None,
     })
 }
 

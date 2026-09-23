@@ -82,6 +82,7 @@ pub struct EncodeOptions {
     pub star_density: u16,
     pub nebula: bool,
     pub frame_pattern: u8,
+    pub sign_with_app_identity: bool,
 }
 
 impl Default for EncodeOptions {
@@ -108,6 +109,7 @@ impl Default for EncodeOptions {
             star_density: 60,
             nebula: false,
             frame_pattern: 0,
+            sign_with_app_identity: false,
         }
     }
 }
@@ -297,6 +299,15 @@ fn finalize_header(mut h: AeroHeader, opts: &EncodeOptions) -> Result<AeroHeader
         for b in raw[30..94].iter_mut() { *b = 0; }
         h.signature = sign_header(sk, &raw);
         h.checksum = h.compute_checksum();
+    } else if opts.sign_with_app_identity {
+        if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+            let msg = crate::identity::app_signed_message(
+                &h.content_hash, h.original_size, h.created_at());
+            let sig = id.sign(&msg);
+            h.signature.copy_from_slice(&sig);
+            h.flags |= crate::types::HEADER_FLAG_APP_SIGNED;
+            h.checksum = h.compute_checksum();
+        }
     }
     Ok(h)
 }

@@ -119,7 +119,7 @@ pub fn inject_stars(matrix: &mut [Complex32], size: usize, density: u16) {
         if xi < 0 || yi < 0 || xi >= size as isize || yi >= size as isize { continue; }
         let xu = xi as usize;
         let yu = yi as usize;
-        let amp = 0.8 + (rng.next() as f32 / u64::MAX as f32) * 0.7;
+        let amp = 10.0 + (rng.next() as f32 / u64::MAX as f32) * 4.0;
         let ph = (rng.next() as f32 / u64::MAX as f32) * std::f32::consts::TAU;
         let v = Complex32::new(amp * ph.cos(), amp * ph.sin());
         let mx = (size - xu) % size;
@@ -276,7 +276,7 @@ pub fn inject_nebula(matrix: &mut [Complex32], size: usize) {
         let cx = half as f32 + r * a.cos();
         let cy = half as f32 + r * a.sin();
         let rad = 1.5 + (rng.next() as f32 / u64::MAX as f32) * 2.5;
-        let amp = 0.5 + (rng.next() as f32 / u64::MAX as f32) * 0.4;
+        let amp = 8.0 + (rng.next() as f32 / u64::MAX as f32) * 3.0;
         let ri = rad.ceil() as isize;
         for dy in -ri..=ri {
             for dx in -ri..=ri {
@@ -305,7 +305,7 @@ pub fn inject_nebula(matrix: &mut [Complex32], size: usize) {
 pub fn inject_frame(matrix: &mut [Complex32], size: usize, pattern: u8) {
     if pattern == 0 { return; }
     let half = size / 2;
-    let amp = 0.9f32;
+    let amp = 12.0f32;
     let r_inner = (half as f32) * 0.20;
     let r_outer = (half as f32) * 0.24;
     for y in 0..size {

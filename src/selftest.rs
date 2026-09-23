@@ -44,6 +44,7 @@ fn build_opts(password: &str, name: &str) -> EncodeOptions {
         star_density: 60,
         nebula: false,
         frame_pattern: 0,
+        sign_with_app_identity: false,
     }
 }
 

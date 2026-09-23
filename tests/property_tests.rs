@@ -40,6 +40,7 @@ fn run_roundtrip(payload: &[u8], password: &str) -> anyhow::Result<Vec<u8>> {
         star_density: 60,
         nebula: false,
         frame_pattern: 0,
+        sign_with_app_identity: false,
     };
     let enc = encode_payload(payload, &opts)?;
     let (w, h) = (enc.image.width(), enc.image.height());
