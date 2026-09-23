@@ -175,7 +175,7 @@ fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
         for p in &peaks {
             let dx = cand.0 as i32 - p.0 as i32;
             let dy = cand.1 as i32 - p.1 as i32;
-            if dx * dx + dy * dy < 25 { ok = false; break; }
+            if dx * dx + dy * dy < 36 { ok = false; break; }
         }
         if ok { peaks.push(cand); }
         if peaks.len() >= 4 { break; }

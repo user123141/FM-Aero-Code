@@ -303,7 +303,7 @@ pub fn encode_payload(payload: &[u8], opts: &EncodeOptions) -> Result<EncodeOutc
 
 pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutcome> {
     let p = prepare(payload, opts)?;
-    const FEC_SAFE_LIMIT: usize = 800;
+    const FEC_SAFE_LIMIT: usize = 600;
     let max_blocks = FEC_SAFE_LIMIT / 255;
     if max_blocks == 0 { return Err(anyhow!("capacity too small")); }
     let max_framed = max_blocks * 223;

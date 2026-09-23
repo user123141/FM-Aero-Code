@@ -398,8 +398,6 @@ impl FmAeroApp {
                     });
             });
             ui.checkbox(&mut self.border, "Detection border (camera / print)");
-            ui.checkbox(&mut self.gamma, "Gamma pre-emphasis");
-            ui.checkbox(&mut self.mask, "Circular mask");
 
             ui.add_space(8.0);
             ui.separator();
