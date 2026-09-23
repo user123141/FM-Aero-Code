@@ -10,7 +10,7 @@ use crate::steganography::STEGO_MAGIC;
 
 /// QIM quantization step. Larger = more robust but more visible.
 /// 14 is a good balance for natural images: max per-pixel change ~ +-2.
-pub const QIM_DELTA: f32 = 14.0;
+pub const QIM_DELTA: f32 = 10.0;
 
 /// Minimum side length in blocks. 64x64 px = 8x8 blocks = 64 blocks.
 const MIN_SIDE: u32 = 64;
@@ -189,18 +189,46 @@ pub fn embed(carrier: &DynamicImage, payload: &[u8], opts: &StegoOptions) -> Res
             let mut dct = [0.0f32; BLOCK_AREA];
             dct8x8(&block, &mut dct);
 
-            // Embed one bit per used coefficient
+            // Snapshot how many bits go into this block
+            let block_bit_start = bit_i;
             for &idx in EMBED_IDX.iter() {
                 if bit_i >= bits.len() { break; }
                 dct[idx] = qim_embed(dct[idx], bits[bit_i]);
                 bit_i += 1;
             }
+            let block_bits_end = bit_i;
 
-            let mut idct = [0.0f32; BLOCK_AREA];
-            idct8x8(&dct, &mut idct);
+            // Iterative refinement: IDCT -> clamp -> re-DCT -> verify -> adjust
+            let mut spatial = [0.0f32; BLOCK_AREA];
+            let mut current_dct = dct;
+            for _pass in 0..3 {
+                idct8x8(&current_dct, &mut spatial);
+                for v in spatial.iter_mut() { *v = v.clamp(0.0, 255.0); }
+                let mut verify = [0.0f32; BLOCK_AREA];
+                dct8x8(&spatial, &mut verify);
+                let mut all_ok = true;
+                for (k, &idx) in EMBED_IDX.iter().enumerate() {
+                    let bi = block_bit_start + k;
+                    if bi >= block_bits_end { break; }
+                    let want = bits[bi];
+                    let got = qim_extract(verify[idx]);
+                    if want != got {
+                        all_ok = false;
+                        let q = (verify[idx] / QIM_DELTA).round() as i32;
+                        let q_adj = if want == 1 {
+                            if q % 2 == 0 { q + 1 } else { q }
+                        } else {
+                            if q % 2 == 1 { q + 1 } else { q }
+                        };
+                        current_dct[idx] = (q_adj as f32) * QIM_DELTA;
+                    }
+                }
+                if all_ok { break; }
+            }
+
             for yy in 0..8 {
                 for xx in 0..8 {
-                    y[(y0 + yy) * w as usize + (x0 + xx)] = idct[yy * 8 + xx];
+                    y[(y0 + yy) * w as usize + (x0 + xx)] = spatial[yy * 8 + xx];
                 }
             }
             if bit_i >= bits.len() { break 'outer; }

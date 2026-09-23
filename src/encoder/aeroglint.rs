@@ -119,7 +119,7 @@ pub fn inject_stars(matrix: &mut [Complex32], size: usize, density: u16) {
         if xi < 0 || yi < 0 || xi >= size as isize || yi >= size as isize { continue; }
         let xu = xi as usize;
         let yu = yi as usize;
-        let amp = 0.04 + (rng.next() as f32 / u64::MAX as f32) * 0.06;
+        let amp = 0.8 + (rng.next() as f32 / u64::MAX as f32) * 0.7;
         let ph = (rng.next() as f32 / u64::MAX as f32) * std::f32::consts::TAU;
         let v = Complex32::new(amp * ph.cos(), amp * ph.sin());
         let mx = (size - xu) % size;
@@ -192,7 +192,7 @@ pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
 /// Encode stream. `_photo` is accepted for API compatibility but ignored.
 pub fn encode_stream(
     stream: &[u8],
-    _photo: Option<&GrayImage>,
+    photo: Option<&GrayImage>,
     _gamma: bool,
     mask: bool,
     star_density: u16,
@@ -240,6 +240,7 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
     }
 
+    if let Some(p) = photo { render_photo_lowfreq(&mut matrix, size, p); }
     if nebula { inject_nebula(&mut matrix, size); }
     if frame_pattern != 0 { inject_frame(&mut matrix, size, frame_pattern); }
     if mask { inject_stars(&mut matrix, size, star_density); }
@@ -275,7 +276,7 @@ pub fn inject_nebula(matrix: &mut [Complex32], size: usize) {
         let cx = half as f32 + r * a.cos();
         let cy = half as f32 + r * a.sin();
         let rad = 1.5 + (rng.next() as f32 / u64::MAX as f32) * 2.5;
-        let amp = 0.02 + (rng.next() as f32 / u64::MAX as f32) * 0.03;
+        let amp = 0.5 + (rng.next() as f32 / u64::MAX as f32) * 0.4;
         let ri = rad.ceil() as isize;
         for dy in -ri..=ri {
             for dx in -ri..=ri {
@@ -304,7 +305,7 @@ pub fn inject_nebula(matrix: &mut [Complex32], size: usize) {
 pub fn inject_frame(matrix: &mut [Complex32], size: usize, pattern: u8) {
     if pattern == 0 { return; }
     let half = size / 2;
-    let amp = 0.03f32;
+    let amp = 0.9f32;
     let r_inner = (half as f32) * 0.20;
     let r_outer = (half as f32) * 0.24;
     for y in 0..size {
@@ -328,6 +329,31 @@ pub fn inject_frame(matrix: &mut [Complex32], size: usize, pattern: u8) {
                 matrix[y * size + x] += v;
                 matrix[my * size + mx] += v.conj();
             }
+        }
+    }
+}
+
+pub fn render_photo_lowfreq(matrix: &mut [Complex32], size: usize, photo: &GrayImage) {
+    let half = size / 2;
+    let small = image::imageops::resize(photo, 16, 16, image::imageops::FilterType::Triangle);
+    let inner_r = (half as f32) * 0.18;
+    for (xi, yi, px) in small.enumerate_pixels() {
+        let fx = -inner_r + (xi as f32 / 15.0) * 2.0 * inner_r;
+        let fy = -inner_r + (yi as f32 / 15.0) * 2.0 * inner_r;
+        let cx = (half as f32 + fx).round() as isize;
+        let cy = (half as f32 + fy).round() as isize;
+        if cx < 0 || cy < 0 || cx >= size as isize || cy >= size as isize { continue; }
+        let xu = cx as usize;
+        let yu = cy as usize;
+        let v = (px.0[0] as f32 - 128.0) / 128.0 * 1.5;
+        let val = Complex32::new(v, 0.0);
+        let mx = (size - xu) % size;
+        let my = (size - yu) % size;
+        if xu == mx && yu == my {
+            matrix[yu * size + xu] = val;
+        } else {
+            matrix[yu * size + xu] = val;
+            matrix[my * size + mx] = val.conj();
         }
     }
 }
