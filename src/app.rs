@@ -93,6 +93,8 @@ pub struct FmAeroApp {
     decoded: Option<DecodedView>,
     zoom: f32,
     pan: Vec2,
+    op_started: Option<Instant>,
+    last_duration: Option<f32>,
     settings: Settings,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
@@ -151,6 +153,8 @@ impl FmAeroApp {
             decoded: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
+            op_started: None,
+            last_duration: None,
             settings,
             rx, tx,
         }
@@ -208,6 +212,7 @@ impl FmAeroApp {
         self.save_settings();
         let tx = self.tx.clone();
         self.busy = true;
+        self.op_started = Some(Instant::now());
         self.push(format!("Encoding {} ({} B)...", name, data.len()));
         std::thread::spawn(move || {
             let opts = EncodeOptions {
@@ -294,6 +299,7 @@ impl FmAeroApp {
         let pw = if self.use_encryption { self.password.clone() } else { String::new() };
         let tx = self.tx.clone();
         self.busy = true;
+        self.op_started = Some(Instant::now());
         self.push("Decoding from file...");
         std::thread::spawn(move || {
             let bytes = match std::fs::read(&path) {
@@ -312,6 +318,7 @@ impl FmAeroApp {
         let pw = if self.use_encryption { self.password.clone() } else { String::new() };
         let tx = self.tx.clone();
         self.busy = true;
+        self.op_started = Some(Instant::now());
         self.push("Decoding from RAM...");
         std::thread::spawn(move || { decode_worker(bytes, pw, tx); });
     }
@@ -373,8 +380,20 @@ impl FmAeroApp {
     fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
-                Msg::Log(s) => { self.busy = false; self.push(s); }
-                Msg::Error(e) => { self.busy = false; self.push(format!("ERROR: {}", e)); }
+                Msg::Log(s) => {
+                    if let Some(t) = self.op_started.take() {
+                        self.last_duration = Some(t.elapsed().as_secs_f32());
+                    }
+                    self.busy = false;
+                    self.push(s);
+                }
+                Msg::Error(e) => {
+                    if let Some(t) = self.op_started.take() {
+                        self.last_duration = Some(t.elapsed().as_secs_f32());
+                    }
+                    self.busy = false;
+                    self.push(format!("ERROR: {}", e));
+                }
                 Msg::Preview { frames, bytes, name, is_apng, page_count } => {
                     self.busy = false;
                     self.frames.clear();
@@ -859,7 +878,15 @@ impl eframe::App for FmAeroApp {
                 ui.label(RichText::new(format!("v{}", VERSION))
                     .color(Color32::from_rgb(120, 200, 255)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.busy { ui.add(egui::Spinner::new()); ui.label("Working..."); }
+                    if self.busy {
+                        let el = self.op_started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+                        ui.add(egui::Spinner::new());
+                        ui.label(format!("Working... {:.1}s", el));
+                        ui.add(egui::ProgressBar::new(0.0).animate(true).desired_width(80.0));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    } else if let Some(d) = self.last_duration {
+                        ui.label(egui::RichText::new(format!("Last: {:.2}s", d)).weak());
+                    }
                     ui.toggle_value(&mut self.show_log, "Log");
                 });
             });

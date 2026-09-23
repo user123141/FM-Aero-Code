@@ -238,16 +238,38 @@ pub fn decode_luma_with_multiplier(luma: &GrayImage, threshold_mult: f32) -> Res
     })
 }
 
-/// Multipass: try multiple thresholds, pick first one where FEC succeeds.
+/// Multipass: try multiple thresholds, pick first one where ALL of these
+/// succeed:
+///   1. FEC decode (RS correction succeeds)
+///   2. Header parses as valid AeroHeader
+///   3. page_crc matches body (if set)
+///
+/// RS can return Ok even when it "corrected" wrong bytes into a valid codeword.
+/// Header + CRC check is the real gate for correctness.
+/// Multipass: try thresholds. Accept only if ALL pass:
+///   1. FEC decode OK
+///   2. Header parses as AeroHeader
+///   3. page_crc matches body (if nonzero)
 pub fn decode_luma_multipass(luma: &GrayImage) -> Result<DecodedGlint> {
     let multipliers = [0.5, 0.4, 0.3, 0.22, 0.15];
     let mut last_err: Option<String> = None;
     for &m in multipliers.iter() {
         match decode_luma_with_multiplier(luma, m) {
             Ok(g) => {
-                if crate::fec::decode(&g.stream).is_ok() {
-                    return Ok(g);
-                }
+                let fec_ok = match crate::fec::decode(&g.stream) {
+                    Ok(decoded) if decoded.len() >= crate::types::AERO_HEADER_SIZE => {
+                        if let Some(h) = crate::types::AeroHeader::from_bytes(
+                            &decoded[..crate::types::AERO_HEADER_SIZE]
+                        ) {
+                            if h.page_crc == 0 { true } else {
+                                let body = &decoded[crate::types::AERO_HEADER_SIZE..];
+                                crate::types::fnv32(body) == h.page_crc
+                            }
+                        } else { false }
+                    }
+                    _ => false,
+                };
+                if fec_ok { return Ok(g); }
             }
             Err(e) => { last_err = Some(e.to_string()); }
         }

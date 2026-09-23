@@ -2,7 +2,7 @@
 
 Fast Memory optical storage. Encode any file into a printable black-and-white pattern that survives camera capture.
 
-Version 3.1.0 | MIT License | Author: Maksym Skorina
+Version 3.5.2 | MIT License | Author: Maksym Skorina
 
 ## What it does
 

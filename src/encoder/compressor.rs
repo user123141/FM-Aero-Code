@@ -8,15 +8,15 @@ const PACK_VERSION: u8 = 0xE2;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlockMethod { Raw = 0, Dpcm1 = 1, Dpcm2 = 2, Rle = 3, BwtMtfrle = 4, RawStored = 5 }
+pub enum BlockMethod { Raw = 0, Dpcm1 = 1, Dpcm2 = 2, Rle = 3, BwtMtfrle = 4, RawStored = 5, BcjZstd = 6 }
 
 impl BlockMethod {
     pub fn from_byte(b: u8) -> Self {
         let k = b ^ 0x5A;
-        match k { 1 => Self::Dpcm1, 2 => Self::Dpcm2, 3 => Self::Rle, 4 => Self::BwtMtfrle, 5 => Self::RawStored, _ => Self::Raw }
+        match k { 1 => Self::Dpcm1, 2 => Self::Dpcm2, 3 => Self::Rle, 4 => Self::BwtMtfrle, 5 => Self::RawStored, 6 => Self::BcjZstd, _ => Self::Raw }
     }
     pub fn to_byte(self) -> u8 {
-        let v = match self { Self::Raw=>0, Self::Dpcm1=>1, Self::Dpcm2=>2, Self::Rle=>3, Self::BwtMtfrle=>4, Self::RawStored=>5 };
+        let v = match self { Self::Raw=>0, Self::Dpcm1=>1, Self::Dpcm2=>2, Self::Rle=>3, Self::BwtMtfrle=>4, Self::RawStored=>5, Self::BcjZstd=>6 };
         v ^ 0x5A
     }
 }
@@ -342,6 +342,11 @@ fn decode_block(e: &BlockEntry) -> Result<Vec<u8>> {
         BlockMethod::Dpcm2 => dpcm2_dec(&backend_d(&e.body, e.orig)?),
         BlockMethod::Rle => rle_dec(&backend_d(&e.body, e.orig)?),
         BlockMethod::BwtMtfrle => bwt_pipe_dec(&backend_d(&e.body, e.orig)?),
+        BlockMethod::BcjZstd => {
+            let mut buf = backend_d(&e.body, e.orig)?;
+            bcj_x86_dec(&mut buf);
+            buf
+        }
     };
     if raw.len() != e.orig {
         return Err(anyhow!("block size {} != {}", raw.len(), e.orig));

@@ -1,6 +1,6 @@
 # FM Aero Code 2 - Format Specification
 
-Version 2.4.0
+Version 3.5.2
 
 ## 1. Overview
 
@@ -29,7 +29,7 @@ Offset | Size | Field
 0      | 3    | Magic = "FM2"
 3      | 1    | Version = 2
 4      | 1    | DataType (0=Text, 1=Audio, 2=Image, 3=Document, 4=Raw, 5=Exe, 6=Archive, 7=Video)
-5      | 1    | CompressionKind (0 = AeroPack v19)
+5      | 1    | CompressionKind (0 = AeroPack v20)
 6      | 1    | CipherKind (0=None, 1=SealV1, 2=SealV2)
 7      | 1    | Flags
 8..11  | 4    | original_size (u32 LE)

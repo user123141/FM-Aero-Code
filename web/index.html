@@ -331,7 +331,7 @@ $("btn-encode").onclick = async () => {
   $("create-status").style.display = "block";
   $("create-status").innerHTML = "<span class=k>Encoding</span><span class=v>" + data.length + " B</span>";
   try {
-    const png = encode_payload_wasm(data, password, filename);
+    const resilience = document.getElementById("resilience").checked ? 4 : 0;
     if (!png.length) { toast("Encode failed", "err"); return; }
     const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
     $("preview-area").style.display = "block";

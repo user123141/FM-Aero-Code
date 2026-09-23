@@ -362,8 +362,7 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
         // Parallel page encoding (native): rayon speedup ~4x on 8+ cores
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use rayon::prelude::*;
-            let results: Result<Vec<image::GrayImage>> = (0..chunks.len()).into_par_iter()
+                        let results: Result<Vec<image::GrayImage>> = (0..chunks.len()).into_par_iter()
                 .map(|i| -> Result<image::GrayImage> {
                     let page_idx = (g * group_size + i) as u16;
                     let mut h = AeroHeader::with_page(
