@@ -1,6 +1,8 @@
-//! AeroGlint decoder (v3.0).
+//! AeroGlint decoder (v3.0.4).
 //!
-//! Adds: gamma inverse, Sauvola adaptive threshold (pre-FFT), border strip.
+//! Multipass decoding: tries multiple thresholds and returns first result
+//! whose FEC succeeds. This makes decoding robust against partially
+//! attenuated data cells.
 
 use anyhow::{anyhow, Result};
 use image::{GrayImage, imageops::FilterType};
@@ -11,13 +13,14 @@ use std::sync::{Arc, OnceLock};
 use crate::AEROGLINT_GRID;
 use crate::encoder::aeroglint::{data_cells, interleave_seed, PILOT_ANGLES};
 
-pub const BORDER_PX: u32 = 24;
+pub const BORDER_PX: u32 = 10;
 pub const BORDERED_GRID: u32 = 128 + 2 * BORDER_PX;
 
 pub struct DecodedGlint {
     pub stream: Vec<u8>,
     pub rotation_deg: f32,
     pub noise_floor: f32,
+    pub threshold_mult: f32,
 }
 
 static FFT128_FWD: OnceLock<Arc<dyn Fft<f32>>> = OnceLock::new();
@@ -59,66 +62,6 @@ fn fft2d(matrix: &mut [Complex32], size: usize) {
     }
 }
 
-/// Apply inverse gamma: value^2.2.
-pub fn undo_gamma(img: &mut GrayImage) {
-    let gamma = 2.2f32;
-    for p in img.pixels_mut() {
-        let v = p.0[0] as f32 / 255.0;
-        let corrected = v.powf(gamma);
-        p.0[0] = (corrected * 255.0).clamp(0.0, 255.0) as u8;
-    }
-}
-
-/// Sauvola adaptive threshold. Window w, k=0.34.
-/// Result: binary 0 or 255.
-pub fn sauvola_threshold(img: &GrayImage, w: u32, k: f32) -> GrayImage {
-    let width = img.width();
-    let height = img.height();
-    if width < w || height < w { return img.clone(); }
-    let r = (w / 2) as i32;
-    // Precompute integral image and squared
-    let mut integral = vec![0u64; ((width + 1) * (height + 1)) as usize];
-    let mut integral_sq = vec![0u64; ((width + 1) * (height + 1)) as usize];
-    for y in 0..height {
-        let mut row_sum: u64 = 0;
-        let mut row_sum_sq: u64 = 0;
-        for x in 0..width {
-            let v = img.get_pixel(x, y).0[0] as u64;
-            row_sum += v;
-            row_sum_sq += v * v;
-            integral[((y + 1) * (width + 1) + (x + 1)) as usize] =
-                integral[(y * (width + 1) + (x + 1)) as usize] + row_sum;
-            integral_sq[((y + 1) * (width + 1) + (x + 1)) as usize] =
-                integral_sq[(y * (width + 1) + (x + 1)) as usize] + row_sum_sq;
-        }
-    }
-    let mut out = GrayImage::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let x0 = (x as i32 - r).max(0) as u32;
-            let y0 = (y as i32 - r).max(0) as u32;
-            let x1 = (x as i32 + r).min(width as i32 - 1) as u32;
-            let y1 = (y as i32 + r).min(height as i32 - 1) as u32;
-            let area = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f32;
-            let sum = integral[((y1 + 1) * (width + 1) + (x1 + 1)) as usize]
-                + integral[(y0 * (width + 1) + x0) as usize]
-                - integral[(y0 * (width + 1) + (x1 + 1)) as usize]
-                - integral[((y1 + 1) * (width + 1) + x0) as usize];
-            let sum_sq = integral_sq[((y1 + 1) * (width + 1) + (x1 + 1)) as usize]
-                + integral_sq[(y0 * (width + 1) + x0) as usize]
-                - integral_sq[(y0 * (width + 1) + (x1 + 1)) as usize]
-                - integral_sq[((y1 + 1) * (width + 1) + x0) as usize];
-            let mean = sum as f32 / area;
-            let var = (sum_sq as f32 / area) - mean * mean;
-            let std = var.max(0.0).sqrt();
-            let threshold = mean * (1.0 + k * (std / 128.0 - 1.0));
-            let v = img.get_pixel(x, y).0[0] as f32;
-            out.put_pixel(x, y, image::Luma([if v > threshold { 255 } else { 0 }]));
-        }
-    }
-    out
-}
-
 fn median_amplitude(matrix: &[Complex32], size: usize) -> f32 {
     let c = size / 2;
     let mut amps: Vec<f32> = Vec::with_capacity(size * size);
@@ -133,24 +76,6 @@ fn median_amplitude(matrix: &[Complex32], size: usize) -> f32 {
     if amps.is_empty() { return 0.0; }
     amps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     amps[amps.len() / 2]
-}
-
-fn rms_amplitude(matrix: &[Complex32], size: usize) -> f32 {
-    let c = size / 2;
-    let mut sum = 0.0f64;
-    let mut count = 0usize;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = (x as i32 - c as i32).abs();
-            let dy = (y as i32 - c as i32).abs();
-            if dx + dy < 4 { continue; }
-            let m = matrix[y * size + x].norm() as f64;
-            sum += m * m;
-            count += 1;
-        }
-    }
-    if count == 0 { return 0.0; }
-    (sum / count as f64).sqrt() as f32
 }
 
 fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
@@ -205,7 +130,6 @@ fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
     deltas[deltas.len() / 2]
 }
 
-/// Strip border if present.
 fn strip_border(img: &GrayImage) -> GrayImage {
     if img.width() == BORDERED_GRID && img.height() == BORDERED_GRID {
         return image::imageops::crop_imm(img, BORDER_PX, BORDER_PX, 128, 128).to_image();
@@ -214,21 +138,16 @@ fn strip_border(img: &GrayImage) -> GrayImage {
 }
 
 pub fn decode_luma(luma: &GrayImage) -> Result<DecodedGlint> {
-    decode_luma_opts(luma, false)
+    decode_luma_with_multiplier(luma, 0.5)
 }
 
-pub fn decode_luma_opts(luma: &GrayImage, apply_sauvola: bool) -> Result<DecodedGlint> {
+pub fn decode_luma_with_multiplier(luma: &GrayImage, threshold_mult: f32) -> Result<DecodedGlint> {
     let size = AEROGLINT_GRID;
     let stripped = strip_border(luma);
-    let pre_processed = if apply_sauvola {
-        sauvola_threshold(&stripped, 15, 0.34)
+    let resized = if stripped.width() != size as u32 || stripped.height() != size as u32 {
+        image::imageops::resize(&stripped, size as u32, size as u32, FilterType::Triangle)
     } else {
         stripped
-    };
-    let resized = if pre_processed.width() != size as u32 || pre_processed.height() != size as u32 {
-        image::imageops::resize(&pre_processed, size as u32, size as u32, FilterType::Triangle)
-    } else {
-        pre_processed
     };
     let mut sum = 0.0f64;
     for p in resized.pixels() { sum += p.0[0] as f64; }
@@ -237,14 +156,15 @@ pub fn decode_luma_opts(luma: &GrayImage, apply_sauvola: bool) -> Result<Decoded
         .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
         .collect();
     fft2d(&mut matrix, size);
+
     let noise_floor = median_amplitude(&matrix, size);
-    let rms = rms_amplitude(&matrix, size);
-    let robust = if noise_floor > 1e-6 { noise_floor } else { rms };
-    let threshold = robust * 0.5;
+    let threshold = noise_floor * threshold_mult;
+
     let mut rotation_rad = find_rotation(&matrix, size);
     if rotation_rad.abs() > 0.262 {
         rotation_rad = 0.0;
     }
+
     let mut compensated = vec![Complex32::new(0.0, 0.0); size * size];
     let c = size as f32 / 2.0;
     let cos_r = (-rotation_rad).cos();
@@ -260,6 +180,7 @@ pub fn decode_luma_opts(luma: &GrayImage, apply_sauvola: bool) -> Result<Decoded
             }
         }
     }
+
     let cells = data_cells(size);
     let mut raw_bits: Vec<u8> = Vec::with_capacity(cells.len() * 2);
     for &(x, y) in &cells {
@@ -273,6 +194,7 @@ pub fn decode_luma_opts(luma: &GrayImage, apply_sauvola: bool) -> Result<Decoded
             raw_bits.push(if v.im > 0.0 { 1 } else { 0 });
         }
     }
+
     let mut perm: Vec<usize> = (0..cells.len() * 2).collect();
     let mut rng = SplitMix64::new(interleave_seed());
     for i in (1..perm.len()).rev() {
@@ -285,7 +207,9 @@ pub fn decode_luma_opts(luma: &GrayImage, apply_sauvola: bool) -> Result<Decoded
             bits[perm[k]] = raw_bits[k];
         }
     }
+
     if bits.len() < 16 { return Err(anyhow!("not enough subcarriers")); }
+
     let mut out = Vec::with_capacity(bits.len() / 8);
     for chunk in bits.chunks(8) {
         if chunk.len() < 8 { break; }
@@ -295,9 +219,28 @@ pub fn decode_luma_opts(luma: &GrayImage, apply_sauvola: bool) -> Result<Decoded
         }
         out.push(b);
     }
+
     Ok(DecodedGlint {
         stream: out,
         rotation_deg: rotation_rad.to_degrees(),
         noise_floor: threshold,
+        threshold_mult,
     })
+}
+
+/// Multipass: try multiple thresholds, pick first one where FEC succeeds.
+pub fn decode_luma_multipass(luma: &GrayImage) -> Result<DecodedGlint> {
+    let multipliers = [0.5, 0.4, 0.3, 0.22, 0.15];
+    let mut last_err: Option<String> = None;
+    for &m in multipliers.iter() {
+        match decode_luma_with_multiplier(luma, m) {
+            Ok(g) => {
+                if crate::fec::decode(&g.stream).is_ok() {
+                    return Ok(g);
+                }
+            }
+            Err(e) => { last_err = Some(e.to_string()); }
+        }
+    }
+    Err(anyhow!("all thresholds failed ({})", last_err.unwrap_or_else(|| "?".into())))
 }

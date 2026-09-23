@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::crypto::{
     constant_time_eq, content_hash_8, hmac_sha256, sha256_short, verify_header, CipherKind,
 };
-use crate::decoder::aeroglint::decode_luma;
+use crate::decoder::aeroglint::{decode_luma, decode_luma_multipass};
 use crate::decoder::apng_reader::load_luma_from_bytes;
 use crate::encoder::compressor::aero_unpack;
 use crate::encoder::pipeline::strip_filename;
@@ -142,7 +142,7 @@ fn decode_frames_multi(frames: &[GrayImage], password: &str, _vk: Option<&Verify
     let mut resilience_level: u8 = 0;
 
     for f in frames.iter() {
-        let glint = match decode_luma(f) { Ok(g) => g, Err(_) => { bad += 1; continue; } };
+        let glint = match decode_luma_multipass(f) { Ok(g) => g, Err(_) => { bad += 1; continue; } };
         let stream = match crate::fec::decode(&glint.stream) { Ok(s) => s, Err(_) => { bad += 1; continue; } };
         let header = match AeroHeader::from_bytes(&stream) {
             Some(h) => h,
