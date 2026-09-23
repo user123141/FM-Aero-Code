@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{Color32, RichText, ScrollArea, Vec2};
 
-use crate::crypto::{generate_recipient, keypair_from_seed, CipherKind};
+use crate::crypto::{generate_recipient, CipherKind};
 use crate::decoder::pipeline::{decode_from_bytes, peek_header_from_bytes};
 use crate::encoder::apng::write_apng_to_vec;
 use crate::encoder::pipeline::{encode_aeroflow, encode_payload, CompressionMode, EncodeOptions};
@@ -51,13 +51,16 @@ pub struct FmAeroApp {
     cipher: CipherKind,
     compression: CompressionMode,
     use_recipient: bool,
-    resilience: bool,
     recipient_pub: String,
     recipient_pub_gen: String,
     recipient_sec_gen: String,
     show_secret: bool,
-    logo_bytes: Option<Vec<u8>>,
-    logo_name: String,
+    photo_bytes: Option<Vec<u8>>,
+    photo_name: String,
+    resilience_level: u8,
+    border: bool,
+    gamma: bool,
+    mask: bool,
     tab: Tab,
     log: Vec<String>,
     busy: bool,
@@ -72,10 +75,8 @@ pub struct FmAeroApp {
     decoded: Option<DecodedView>,
     zoom: f32,
     pan: Vec2,
-    preview_max_frames: usize,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
-    signing_seed: [u8; 32],
 }
 
 impl FmAeroApp {
@@ -87,8 +88,6 @@ impl FmAeroApp {
         v.selection.bg_fill = Color32::from_rgb(10, 132, 255);
         cc.egui_ctx.set_visuals(v);
         let (tx, rx) = channel();
-        let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
         Self {
             input: String::new(),
             text_payload: "Hello, FM Aero Code 2!".into(),
@@ -96,13 +95,16 @@ impl FmAeroApp {
             cipher: CipherKind::SealV1,
             compression: CompressionMode::LosslessPriority,
             use_recipient: false,
-            resilience: false,
             recipient_pub: String::new(),
             recipient_pub_gen: String::new(),
             recipient_sec_gen: String::new(),
             show_secret: false,
-            logo_bytes: None,
-            logo_name: String::new(),
+            photo_bytes: None,
+            photo_name: String::new(),
+            resilience_level: 0,
+            border: false,
+            gamma: false,
+            mask: false,
             tab: Tab::Pattern,
             log: vec!["Ready.".into()],
             busy: false,
@@ -117,9 +119,7 @@ impl FmAeroApp {
             decoded: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
-            preview_max_frames: 128,
             rx, tx,
-            signing_seed: seed,
         }
     }
 
@@ -144,16 +144,17 @@ impl FmAeroApp {
             else { Path::new(&self.input).file_name().and_then(|n| n.to_str())
                    .unwrap_or("payload.bin").to_string() };
         let pw = self.password.clone();
-        let resilience = self.resilience;
         let recipient = if self.use_recipient { Some(self.recipient_pub.clone()) } else { None };
         let cm = self.compression;
-        let seed = self.signing_seed;
-        let logo = self.logo_bytes.clone();
+        let photo = self.photo_bytes.clone();
+        let resilience_level = self.resilience_level;
+        let border = self.border;
+        let gamma = self.gamma;
+        let mask = self.mask;
         let tx = self.tx.clone();
         self.busy = true;
         self.push(format!("Encoding {} ({} B)...", name, data.len()));
         std::thread::spawn(move || {
-            let (sk, _) = keypair_from_seed(&seed);
             let opts = EncodeOptions {
                 cipher: if pw.is_empty() && recipient.is_none() { CipherKind::None }
                         else if recipient.is_some() { CipherKind::SealV2 }
@@ -162,14 +163,17 @@ impl FmAeroApp {
                 pad: true,
                 compression: cm,
                 original_name: name.clone(),
-                center_logo: logo,
-                signing_key: None, // auto-sign removed (was random, unverifiable)
+                center_logo: photo,
+                signing_key: None,
                 hmac_enabled: true,
                 auto_lossless_media: true,
                 recipient_key: recipient,
                 recipients: Vec::new(),
                 gps: None,
-                resilience: resilience,
+                resilience_level,
+                border,
+                gamma,
+                mask,
             };
             match encode_payload(&data, &opts) {
                 Ok(r) => {
@@ -211,8 +215,8 @@ impl FmAeroApp {
                                         frames_px.push((px, w, h));
                                     }
                                     let _ = tx.send(Msg::Log(format!(
-                                        "Encoded APNG {} pages | input {} B -> APNG {} B (preview {} frames)",
-                                        page_count, f.payload_bytes, apng.len(), frames_px.len())));
+                                        "Encoded APNG {} pages | input {} B -> APNG {} B",
+                                        page_count, f.payload_bytes, apng.len())));
                                     let _ = tx.send(Msg::Preview {
                                         frames: frames_px,
                                         bytes: apng,
@@ -256,9 +260,7 @@ impl FmAeroApp {
         let tx = self.tx.clone();
         self.busy = true;
         self.push("Decoding from RAM...");
-        std::thread::spawn(move || {
-            decode_worker(bytes, pw, tx);
-        });
+        std::thread::spawn(move || { decode_worker(bytes, pw, tx); });
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -318,9 +320,7 @@ impl FmAeroApp {
             }
             ctx.request_repaint_after(Duration::from_millis(50));
         }
-        if self.busy {
-            ctx.request_repaint_after(Duration::from_millis(80));
-        }
+        if self.busy { ctx.request_repaint_after(Duration::from_millis(80)); }
     }
 
     fn ui_side(&mut self, ui: &mut egui::Ui) {
@@ -338,7 +338,7 @@ impl FmAeroApp {
             ui.add(egui::TextEdit::singleline(&mut self.input)
                 .hint_text("path or drop file").desired_width(f32::INFINITY));
             ui.add_space(4.0);
-            ui.label(RichText::new("Or type text to embed:").weak());
+            ui.label(RichText::new("Or type text:").weak());
             ui.add(egui::TextEdit::multiline(&mut self.text_payload)
                 .desired_rows(3).desired_width(f32::INFINITY));
 
@@ -346,23 +346,22 @@ impl FmAeroApp {
             ui.separator();
             ui.heading("Security");
             let mode_label = if self.use_recipient && !self.recipient_pub.is_empty() {
-                "AeroSeal v2 (recipient X25519)"
+                "AeroSeal v2 (recipient)"
             } else if !self.password.is_empty() {
-                "AeroSeal v1 (password symmetric)"
+                "AeroSeal v1 (password)"
             } else {
                 "None (no encryption)"
             };
-            ui.label(RichText::new(format!("Mode: {}", mode_label)).color(Color32::from_rgb(120, 200, 255)));
-            ui.add_space(4.0);
-            ui.label(RichText::new("Password (for AeroSeal v1)").weak());
+            ui.label(RichText::new(format!("Mode: {}", mode_label))
+                .color(Color32::from_rgb(120, 200, 255)));
+            ui.label(RichText::new("Password").weak());
             ui.add(egui::TextEdit::singleline(&mut self.password)
                 .password(true).desired_width(f32::INFINITY)
                 .hint_text("empty = no encryption"));
-            ui.add_space(4.0);
             ui.checkbox(&mut self.use_recipient, "Use recipient key (AeroSeal v2)");
             if self.use_recipient {
                 ui.add(egui::TextEdit::singleline(&mut self.recipient_pub)
-                    .hint_text("64 hex chars X25519 public key").desired_width(f32::INFINITY));
+                    .hint_text("64 hex chars X25519 public").desired_width(f32::INFINITY));
             }
 
             ui.add_space(8.0);
@@ -378,31 +377,53 @@ impl FmAeroApp {
 
             ui.add_space(8.0);
             ui.separator();
-            ui.checkbox(&mut self.resilience, "Resilience mode (200 data + 50 parity pages)");
-            ui.label(RichText::new("Recovers from up to 50 lost pages per group").weak());
+            ui.heading("Transport");
+            ui.horizontal(|ui| {
+                ui.label("Resilience:");
+                let label = match self.resilience_level {
+                    1 => "Low (5%)",
+                    2 => "Balanced (10%)",
+                    3 => "High (25%)",
+                    4 => "Extreme (50%)",
+                    _ => "Off",
+                };
+                egui::ComboBox::from_id_salt("res_level")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.resilience_level, 0, "Off");
+                        ui.selectable_value(&mut self.resilience_level, 1, "Low (5%)");
+                        ui.selectable_value(&mut self.resilience_level, 2, "Balanced (10%)");
+                        ui.selectable_value(&mut self.resilience_level, 3, "High (25%)");
+                        ui.selectable_value(&mut self.resilience_level, 4, "Extreme (50%)");
+                    });
+            });
+            ui.checkbox(&mut self.border, "Detection border (camera / print)");
+            ui.checkbox(&mut self.gamma, "Gamma pre-emphasis");
+            ui.checkbox(&mut self.mask, "Circular mask");
 
             ui.add_space(8.0);
             ui.separator();
-            ui.heading("Center logo (optional)");
+            ui.heading("Spectral camouflage");
+            ui.label(RichText::new("Photo overlaid in low frequencies - looks like the photo, contains data").weak());
             ui.horizontal(|ui| {
-                let label = if self.logo_bytes.is_some() { "Change logo" } else { "Add logo" };
+                let label = if self.photo_bytes.is_some() { "Change photo" } else { "Add photo" };
                 if ui.button(label).clicked() {
                     if let Some(p) = rfd::FileDialog::new()
                         .add_filter("image", &["png", "jpg", "jpeg", "bmp", "webp"])
                         .pick_file()
                     {
                         if let Ok(b) = std::fs::read(&p) {
-                            self.logo_bytes = Some(b);
-                            self.logo_name = p.file_name()
-                                .and_then(|n| n.to_str()).unwrap_or("logo").into();
+                            self.photo_bytes = Some(b);
+                            self.photo_name = p.file_name()
+                                .and_then(|n| n.to_str()).unwrap_or("photo").into();
                         }
                     }
                 }
-                if self.logo_bytes.is_some() {
-                    ui.label(RichText::new(format!("[{}]", self.logo_name)).weak());
+                if self.photo_bytes.is_some() {
+                    ui.label(RichText::new(format!("[{}]", self.photo_name)).weak());
                     if ui.small_button("x").clicked() {
-                        self.logo_bytes = None;
-                        self.logo_name.clear();
+                        self.photo_bytes = None;
+                        self.photo_name.clear();
                     }
                 }
             });
@@ -435,7 +456,7 @@ impl FmAeroApp {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.label(RichText::new(format!(
-                    "Pattern ready: {} {} ({:.1} KB)",
+                    "Pattern: {} {} ({:.1} KB)",
                     if is_apng { "APNG" } else { "PNG" },
                     name, bytes.len() as f64 / 1024.0)).weak());
                 if ui.add_sized([ui.available_width(), 34.0],
@@ -457,8 +478,7 @@ impl FmAeroApp {
             Tab::Pattern => {
                 if self.frames.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label(RichText::new("No pattern yet. Click ENCODE.")
-                            .size(18.0).weak());
+                        ui.label(RichText::new("No pattern yet. Click ENCODE.").size(18.0).weak());
                     });
                     return;
                 }
@@ -466,22 +486,17 @@ impl FmAeroApp {
                     let total = self.page_count.max(1);
                     let previewing = self.frames.len();
                     ui.label(RichText::new(format!(
-                        "Page {}/{} ({} total, preview {} of them)",
+                        "Page {}/{} ({} total, preview {})",
                         self.frame_index + 1, previewing, total, previewing)).weak());
                     if previewing > 1 {
                         ui.separator();
                         if ui.button("<").clicked() {
-                            self.frame_index = if self.frame_index == 0 {
-                                previewing - 1
-                            } else { self.frame_index - 1 };
+                            self.frame_index = if self.frame_index == 0 { previewing - 1 } else { self.frame_index - 1 };
                         }
                         if ui.button(">").clicked() {
                             self.frame_index = (self.frame_index + 1) % previewing;
                         }
                         ui.checkbox(&mut self.autoplay, "Play");
-                        ui.separator();
-                        ui.label("Preview:");
-                        ui.add(egui::DragValue::new(&mut self.preview_max_frames).range(1..=512));
                     }
                 });
                 ui.separator();
@@ -491,16 +506,14 @@ impl FmAeroApp {
                         ui.available_size(), egui::Sense::click_and_drag());
                     let sc = ui.input(|i| i.raw_scroll_delta.y);
                     if sc.abs() > 0.0 {
-                        self.zoom = (self.zoom * (sc * 0.01).exp())
-                            .clamp(MIN_ZOOM, MAX_ZOOM);
+                        self.zoom = (self.zoom * (sc * 0.01).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
                     }
                     if resp.dragged() { self.pan += resp.drag_delta(); }
                     let c = resp.rect.center() + self.pan;
                     let size = egui::vec2(w as f32, h as f32) * self.zoom;
                     let r = egui::Rect::from_center_size(c, size);
                     painter.image(tex.id(), r,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0),
-                                                 egui::pos2(1.0, 1.0)),
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         Color32::WHITE);
                 }
             }
@@ -531,8 +544,7 @@ impl FmAeroApp {
                         let c = resp.rect.center() + self.pan;
                         let r = egui::Rect::from_center_size(c, size);
                         painter.image(tex.id(), r,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0),
-                                                     egui::pos2(1.0, 1.0)),
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             Color32::WHITE);
                     } else {
                         ui.label("Binary data. Use Save As.");
@@ -552,21 +564,17 @@ impl FmAeroApp {
             Tab::Keys => {
                 ui.heading("Key management");
                 ui.separator();
-                if ui.button("Generate new X25519 recipient keypair").clicked() {
+                if ui.button("Generate X25519 keypair").clicked() {
                     let kp = generate_recipient();
                     self.recipient_pub_gen = hex::encode(kp.public.as_bytes());
                     self.recipient_sec_gen = hex::encode(kp.secret.to_bytes());
                 }
                 ui.add_space(6.0);
                 ui.label("Public (share):");
-                ui.add(egui::TextEdit::singleline(&mut self.recipient_pub_gen)
-                    .desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::singleline(&mut self.recipient_pub_gen).desired_width(f32::INFINITY));
                 ui.label("Secret (keep private):");
-                let sec_display = if self.show_secret {
-                    self.recipient_sec_gen.clone()
-                } else {
-                    "*".repeat(self.recipient_sec_gen.len().min(64))
-                };
+                let sec_display = if self.show_secret { self.recipient_sec_gen.clone() }
+                                  else { "*".repeat(self.recipient_sec_gen.len().min(64)) };
                 let mut s = sec_display;
                 ui.add(egui::TextEdit::singleline(&mut s).desired_width(f32::INFINITY));
                 ui.checkbox(&mut self.show_secret, "Show secret");
@@ -585,15 +593,16 @@ impl FmAeroApp {
                 ui.label("Fast Memory optical storage via AeroGlint Spectrum Protocol.");
                 ui.add_space(8.0);
                 ui.label(RichText::new("Technologies:").strong());
-                ui.label("- AeroPack v19 (BWT+MTF+RLE+DPCM adaptive)");
+                ui.label("- AeroPack v20 (BWT+MTF+RLE+DPCM3+BCJ)");
                 ui.label("- AeroGlint Spectrum (2D OFDM over FFT)");
-                ui.label("- Reed-Solomon RS(255,223) FEC");
+                ui.label("- Reed-Solomon RS(255,223) FEC + page-level resilience");
                 ui.label("- AeroSeal v1 (XChaCha20+Argon2id+HMAC)");
                 ui.label("- AeroSeal v2 (X25519 ephemeral)");
                 ui.label("- Ed25519 signatures");
-                ui.label("- PRNG bit interleaving");
-                ui.label("- Adaptive noise threshold");
-                ui.label("- Spectral camouflage logo");
+                ui.label("- Spectral camouflage (photo in low-freq)");
+                ui.label("- Gamma pre-emphasis");
+                ui.label("- Circle mask");
+                ui.label("- Detection border + finder patterns");
                 ui.add_space(8.0);
                 if ui.button("Open GitHub repo").clicked() {
                     let _ = webbrowser::open("https://github.com/user123141/FM-Aero-Code");
@@ -619,8 +628,9 @@ fn decode_worker(bytes: Vec<u8>, pw: String, tx: Sender<Msg>) {
     match decode_from_bytes(&bytes, &pw, None) {
         Ok(r) => {
             let _ = tx.send(Msg::Log(format!(
-                "Decoded: {} B, hash_ok={}, sig_ok={}, hmac_ok={}",
-                r.payload.len(), r.hash_ok, r.signature_ok, r.hmac_ok)));
+                "Decoded: {} B, hash_ok={}, sig_ok={}, hmac_ok={}{}",
+                r.payload.len(), r.hash_ok, r.signature_ok, r.hmac_ok,
+                if r.recovered_from_parity { " [recovered from parity]" } else { "" })));
             let _ = tx.send(Msg::Decoded {
                 payload: r.payload,
                 dt: r.header.data_type,
@@ -647,7 +657,7 @@ impl eframe::App for FmAeroApp {
                 });
             });
         });
-        egui::SidePanel::left("left").default_width(380.0).resizable(false)
+        egui::SidePanel::left("left").default_width(400.0).resizable(false)
             .show(ctx, |ui| { self.ui_side(ui); });
         if self.show_log {
             egui::TopBottomPanel::bottom("log")
@@ -655,9 +665,7 @@ impl eframe::App for FmAeroApp {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Log").strong());
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Clear").clicked() { self.log.clear(); }
                             if ui.button("Copy all").clicked() {
                                 let txt = self.log.join("\n");
@@ -670,7 +678,7 @@ impl eframe::App for FmAeroApp {
                         for line in &self.log {
                             let c = if line.starts_with("ERROR") {
                                 Color32::from_rgb(255, 120, 120)
-                            } else if line.contains("[OK]") {
+                            } else if line.contains("[OK]") || line.contains("hash_ok=true") {
                                 Color32::from_rgb(120, 220, 140)
                             } else {
                                 Color32::from_gray(200)

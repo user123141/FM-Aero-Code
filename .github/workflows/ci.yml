@@ -1,0 +1,19 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --no-default-features
+      - name: Test
+        run: cargo test --release --no-default-features
+      - name: Selftest
+        run: cargo run --release --no-default-features --bin fm_selftest

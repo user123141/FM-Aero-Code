@@ -1,11 +1,14 @@
 [package]
 name = "fm_aero_code_2"
-version = "2.7.1"
+version = "3.0.2"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]
 description = "FM Aero Code 2 - Fast Memory optical storage via AeroGlint Spectrum"
 repository = "https://github.com/user123141/FM-Aero-Code"
+readme = "README.md"
+keywords = ["optical", "storage", "fft", "ofdm", "wasm"]
+categories = ["encoding", "multimedia::images"]
 default-run = "fm_gui"
 
 [lib]
@@ -62,7 +65,7 @@ getrandom    = { version = "0.2", features = ["js"] }
 walkdir      = "2.5"
 reed-solomon = "0.2"
 reed-solomon-erasure = "6.0"
-webbrowser = "1"
+webbrowser   = "1"
 eframe       = { version = "0.29", optional = true, default-features = false, features = ["default_fonts", "glow"] }
 rfd          = { version = "0.15", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -78,6 +81,14 @@ zstd = "0.13"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 instant = { version = "0.1", features = ["wasm-bindgen"] }
 ruzstd = "0.7"
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5"
+
+[[bench]]
+name = "aeropack_bench"
+harness = false
 
 [features]
 default = ["gui"]
@@ -98,10 +109,3 @@ codegen-units = 1
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
-[dev-dependencies]
-proptest = "1"
-criterion = "0.5"
-
-[[bench]]
-name = "aeropack_bench"
-harness = false

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use image::GrayImage;
+use std::collections::HashMap;
 
 use crate::crypto::{
     constant_time_eq, content_hash_8, hmac_sha256, sha256_short, verify_header, CipherKind,
@@ -9,8 +10,8 @@ use crate::decoder::apng_reader::load_luma_from_bytes;
 use crate::encoder::compressor::aero_unpack;
 use crate::encoder::pipeline::strip_filename;
 use crate::types::{
-    AeroHeader, AERO_HEADER_SIZE, HEADER_FLAG_HMAC, HEADER_FLAG_NAMED,
-    HEADER_FLAG_PADDED, HEADER_FLAG_SIGNED,
+    AeroHeader, DataType, ResilienceLevel, AERO_HEADER_SIZE,
+    HEADER_FLAG_HMAC, HEADER_FLAG_NAMED, HEADER_FLAG_PADDED, HEADER_FLAG_SIGNED,
 };
 use crate::MAX_DECOMPRESSED_BYTES;
 use ed25519_dalek::VerifyingKey;
@@ -25,6 +26,8 @@ pub struct DecodeOutcome {
     pub original_filename: String,
     pub created_at: Option<String>,
     pub recovered_from_parity: bool,
+    pub pages_received: usize,
+    pub pages_total: usize,
 }
 
 fn recover_stream(luma: &GrayImage) -> Result<Vec<u8>> {
@@ -47,12 +50,9 @@ pub fn split_header_and_payload(stream: &[u8]) -> Result<(AeroHeader, Vec<u8>)> 
     Ok((header, payload))
 }
 
-fn finish(
-    header: &AeroHeader,
-    stream: Vec<u8>,
-    password: &str,
-    verify_key: Option<&VerifyingKey>,
-) -> Result<(Vec<u8>, String, bool, bool, bool)> {
+fn finish(header: &AeroHeader, stream: Vec<u8>, password: &str, verify_key: Option<&VerifyingKey>)
+    -> Result<(Vec<u8>, String, bool, bool, bool)>
+{
     let mut hmac_ok = true;
     if header.flags & HEADER_FLAG_HMAC != 0 && !password.is_empty() {
         let raw = header.hmac_input();
@@ -96,24 +96,24 @@ fn finish(
     Ok((up, fname, hash_ok, signature_ok, hmac_ok))
 }
 
-fn outcome(h: AeroHeader, s: Vec<u8>, pw: &str, vk: Option<&VerifyingKey>, recovered: bool) -> Result<DecodeOutcome> {
+fn outcome(h: AeroHeader, s: Vec<u8>, pw: &str, vk: Option<&VerifyingKey>, recovered: bool,
+           recv: usize, total: usize) -> Result<DecodeOutcome>
+{
     let (payload, original_filename, hash_ok, signature_ok, hmac_ok) = finish(&h, s, pw, vk)?;
     let sha = sha256_short(&payload);
-    let created = {
-        let s = h.created_at_str();
-        if s == "unknown" { None } else { Some(s) }
-    };
+    let created = { let s = h.created_at_str(); if s == "unknown" { None } else { Some(s) } };
     Ok(DecodeOutcome {
-        payload, header: h, sha256: sha, hash_ok,
-        signature_ok, hmac_ok, original_filename, created_at: created,
+        payload, header: h, sha256: sha, hash_ok, signature_ok, hmac_ok,
+        original_filename, created_at: created,
         recovered_from_parity: recovered,
+        pages_received: recv, pages_total: total,
     })
 }
 
 pub fn decode_image(img: &GrayImage, password: &str, vk: Option<&VerifyingKey>) -> Result<DecodeOutcome> {
     let stream = recover_stream(img)?;
     let (h, payload) = split_header_and_payload(&stream)?;
-    outcome(h, payload, password, vk, false)
+    outcome(h, payload, password, vk, false, 1, 1)
 }
 
 pub fn decode_from_bytes(data: &[u8], password: &str, vk: Option<&VerifyingKey>) -> Result<DecodeOutcome> {
@@ -129,151 +129,144 @@ pub fn decode_from_bytes(data: &[u8], password: &str, vk: Option<&VerifyingKey>)
     decode_image(&img, password, vk)
 }
 
+/// Struct for a decoded page before grouping.
+struct Page {
+    stream: Vec<u8>,
+    header: AeroHeader,
+}
+
 fn decode_frames_multi(frames: &[GrayImage], password: &str, _vk: Option<&VerifyingKey>) -> Result<DecodeOutcome> {
-    let total_frames = frames.len();
-    let mut pages: Vec<(u16, Vec<u8>)> = Vec::with_capacity(total_frames);
-    let mut sample_header: Option<AeroHeader> = None;
+    let mut pages: Vec<Page> = Vec::with_capacity(frames.len());
+    let mut bad: usize = 0;
     let mut total_pages: u16 = 0;
-    let mut failed: usize = 0;
-    let mut bad_pages: Vec<u16> = Vec::new();
+    let mut resilience_level: u8 = 0;
 
     for f in frames.iter() {
-        let glint = match decode_luma(f) {
-            Ok(g) => g,
-            Err(_) => { failed += 1; continue; }
-        };
-        let stream = match crate::fec::decode(&glint.stream) {
-            Ok(s) => s,
-            Err(_) => { failed += 1; continue; }
-        };
-        let h = match AeroHeader::from_bytes(&stream) {
+        let glint = match decode_luma(f) { Ok(g) => g, Err(_) => { bad += 1; continue; } };
+        let stream = match crate::fec::decode(&glint.stream) { Ok(s) => s, Err(_) => { bad += 1; continue; } };
+        let header = match AeroHeader::from_bytes(&stream) {
             Some(h) => h,
-            None => { failed += 1; continue; }
+            None => { bad += 1; continue; }
         };
-        if sample_header.is_none() { sample_header = Some(h.clone()); total_pages = h.page_total; }
-        if h.page_crc != 0 {
+        // CRC check
+        if header.page_crc != 0 {
             let body = &stream[AERO_HEADER_SIZE..];
-            let actual = crate::types::fnv32(body);
-            if actual != h.page_crc {
-                bad_pages.push(h.page_index);
-                failed += 1;
+            if crate::types::fnv32(body) != header.page_crc {
+                bad += 1;
                 continue;
             }
         }
-        pages.push((h.page_index, stream));
+        if total_pages == 0 { total_pages = header.page_total; resilience_level = header.resilience_level; }
+        pages.push(Page { stream, header });
     }
 
     if pages.is_empty() {
-        return Err(anyhow!("no valid pages in {} frames ({} failed)", total_frames, failed));
-    }
-    if !bad_pages.is_empty() {
-        let show = bad_pages.len().min(20);
-        let list: Vec<String> = bad_pages[..show].iter().map(|i| i.to_string()).collect();
-        eprintln!("[warn] {} of {} pages failed CRC32; {} OK; first bad: {}",
-                  bad_pages.len(), total_frames, pages.len(), list.join(","));
+        return Err(anyhow!("no valid pages ({} failed)", bad));
     }
 
-    // Detect resilience mode: 250 total pages (200 data + 50 parity)
-    let resilience_mode = total_pages == (crate::resilience::DATA_PAGES + crate::resilience::PARITY_PAGES) as u16;
+    let level = ResilienceLevel::from_u8(resilience_level);
+    let (data_pg, par_pg) = level.split();
+    let group_size = data_pg + par_pg;
 
-    if resilience_mode {
-        // Try direct: need all 200 data pages present
-        let data_present: Vec<(u16, Vec<u8>)> = pages.iter()
-            .filter(|(idx, _)| (*idx as usize) < crate::resilience::DATA_PAGES)
-            .cloned().collect();
+    let received = pages.len();
+    let mut recovered_from_parity = false;
 
-        if data_present.len() == crate::resilience::DATA_PAGES {
-            let mut sorted = data_present;
-            sorted.sort_by_key(|(i, _)| *i);
-            let streams: Vec<Vec<u8>> = sorted.into_iter().map(|(_, s)| s).collect();
-            return decode_apng_streams(&streams, password);
-        }
+    // Build per-group slot maps
+    let num_groups = (total_pages as usize + group_size - 1) / group_size;
+    let mut groups: Vec<HashMap<usize, Vec<u8>>> = (0..num_groups)
+        .map(|_| HashMap::new()).collect();
 
-        // Need recovery
-        eprintln!("[info] resilience recovery: {} data + {} parity present; calling RS",
-                  data_present.len(), pages.len() - data_present.len());
-        match recover_with_parity(&pages, total_pages) {
-            Ok(streams) => {
-                let mut result = decode_apng_streams(&streams, password)?;
-                result.recovered_from_parity = true;
-                return Ok(result);
-            }
-            Err(e) => {
-                return Err(anyhow!("recovered {}/{} pages; parity recovery failed: {}",
-                    pages.len(), total_pages, e));
-            }
+    for page in &pages {
+        let idx = page.header.page_index as usize;
+        let g = idx / group_size;
+        let slot = idx % group_size;
+        if g < num_groups {
+            groups[g].insert(slot, page.stream.clone());
         }
     }
 
-    // Non-resilience mode: strict
-    if total_pages > 0 && (pages.len() as u16) < total_pages {
-        let pct = 100.0 * pages.len() as f64 / total_pages as f64;
-        return Err(anyhow!("recovered {} of {} pages ({:.1}%)", pages.len(), total_pages, pct));
-    }
-    pages.sort_by_key(|(i, _)| *i);
-    let streams: Vec<Vec<u8>> = pages.into_iter().map(|(_, s)| s).collect();
-    decode_apng_streams(&streams, password)
-}
+    // Reconstruct data page streams for each group
+    let mut all_streams: Vec<(u16, Vec<u8>)> = Vec::with_capacity(total_pages as usize);
 
-fn recover_with_parity(present: &[(u16, Vec<u8>)], _total: u16) -> Result<Vec<Vec<u8>>> {
-    use crate::resilience::{DATA_PAGES, PARITY_PAGES, GROUP_SIZE};
-    if DATA_PAGES + PARITY_PAGES != GROUP_SIZE {
-        return Err(anyhow!("resilience constants mismatch"));
-    }
-    // Extract body from each stream (skip header)
-    let mut slots: Vec<Option<Vec<u8>>> = vec![None; GROUP_SIZE];
-    let mut max_body = 0usize;
-    for (idx, stream) in present {
-        let i = *idx as usize;
-        if i >= GROUP_SIZE { continue; }
-        let body = if stream.len() > AERO_HEADER_SIZE {
-            stream[AERO_HEADER_SIZE..].to_vec()
-        } else { continue };
-        if body.len() > max_body { max_body = body.len(); }
-        slots[i] = Some(body);
-    }
-    if max_body == 0 { return Err(anyhow!("no bodies")); }
-
-    // Pad all bodies to max_body
-    let present_pairs: Vec<(usize, Vec<u8>)> = slots.iter().enumerate()
-        .filter_map(|(i, s)| s.as_ref().map(|b| {
-            let mut padded = vec![0u8; max_body];
-            padded[..b.len()].copy_from_slice(b);
-            (i, padded)
-        }))
-        .collect();
-
-    let recovered_bodies = crate::resilience::recover_group(&present_pairs)?;
-
-    // Rebuild streams with a template header from any present data page
-    let template_header = present.iter()
-        .find(|(idx, _)| (*idx as usize) < DATA_PAGES)
-        .map(|(_, s)| s[..AERO_HEADER_SIZE].to_vec())
-        .ok_or_else(|| anyhow!("no data page present to use as header template"))?;
-
-    let mut streams: Vec<Vec<u8>> = Vec::with_capacity(DATA_PAGES);
-    for (i, body) in recovered_bodies.iter().enumerate() {
-        // Try to preserve original header if we had it, else use template
-        let mut stream = if let Some(Some(orig)) = slots.get(i) {
-            let mut v = vec![0u8; AERO_HEADER_SIZE];
-            v.copy_from_slice(&template_header);
-            // Fix page_index in header
-            v[18] = (i & 0xFF) as u8;
-            v[19] = ((i >> 8) & 0xFF) as u8;
-            let _ = orig;
-            v
+    for (g, group) in groups.iter().enumerate() {
+        // Check if all data slots present
+        let data_present: Vec<usize> = (0..data_pg).filter(|i| group.contains_key(i)).collect();
+        if data_present.len() == data_pg {
+            // Direct use
+            for slot in 0..data_pg {
+                let stream = group.get(&slot).unwrap().clone();
+                let idx = (g * group_size + slot) as u16;
+                all_streams.push((idx, stream));
+            }
+        } else if par_pg > 0 {
+            // Try parity recovery
+            eprintln!("[info] group {}: {} / {} data pages present, attempting RS recovery",
+                      g, data_present.len(), data_pg);
+            // Extract bodies (chunks) from each present page. Strip header.
+            let mut present: Vec<(usize, Vec<u8>)> = Vec::new();
+            let mut chunk_size = 0usize;
+            let mut template_header: Option<Vec<u8>> = None;
+            for (slot, stream) in group.iter() {
+                let body = if stream.len() > AERO_HEADER_SIZE {
+                    stream[AERO_HEADER_SIZE..].to_vec()
+                } else { continue };
+                if body.len() > chunk_size { chunk_size = body.len(); }
+                if template_header.is_none() {
+                    template_header = Some(stream[..AERO_HEADER_SIZE].to_vec());
+                }
+                present.push((*slot, body));
+            }
+            if present.is_empty() || template_header.is_none() {
+                return Err(anyhow!("group {}: no usable pages", g));
+            }
+            // Recover chunks
+            let recovered = match crate::resilience::recover_group_n(&present, data_pg, par_pg) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(anyhow!("recovered {} of {} pages; RS failed on group {}: {}",
+                        received, total_pages, g, e));
+                }
+            };
+            recovered_from_parity = true;
+            let tmpl = template_header.unwrap();
+            for (i, chunk) in recovered.into_iter().enumerate() {
+                let idx = (g * group_size + i) as u16;
+                // Build synthetic header: use template, patch page_index + page_crc
+                let mut stream = tmpl.clone();
+                stream[18] = (idx & 0xFF) as u8;
+                stream[19] = ((idx >> 8) & 0xFF) as u8;
+                // Patch page_crc
+                let crc = crate::types::fnv32(&chunk);
+                stream[114..118].copy_from_slice(&crc.to_le_bytes());
+                // Recompute checksum
+                // (truncate chunks to their original size)
+                stream.extend_from_slice(&chunk);
+                all_streams.push((idx, stream));
+            }
         } else {
-            let mut v = vec![0u8; AERO_HEADER_SIZE];
-            v.copy_from_slice(&template_header);
-            v[18] = (i & 0xFF) as u8;
-            v[19] = ((i >> 8) & 0xFF) as u8;
-            v
-        };
-        // Trim body to original chunk size (header.payload_size - offset)
-        stream.extend_from_slice(body);
-        streams.push(stream);
+            return Err(anyhow!("group {}: only {}/{} data pages, no parity", g, data_present.len(), data_pg));
+        }
     }
-    Ok(streams)
+
+    all_streams.sort_by_key(|(i, _)| *i);
+    let streams: Vec<Vec<u8>> = all_streams.into_iter().map(|(_, s)| s).collect();
+
+    // Convert to payload via concat + truncate
+    let mut sample_h: Option<AeroHeader> = None;
+    let mut combined: Vec<u8> = Vec::new();
+    for s in &streams {
+        let (h, payload) = match split_header_and_payload(s) {
+            Ok(x) => x,
+            Err(_) => continue,
+        };
+        if sample_h.is_none() { sample_h = Some(h.clone()); }
+        combined.extend_from_slice(&payload);
+    }
+    let header = sample_h.ok_or_else(|| anyhow!("no valid headers"))?;
+    let declared = header.payload_size as usize;
+    if declared > 0 && declared < combined.len() { combined.truncate(declared); }
+
+    outcome(header, combined, password, None, recovered_from_parity, received, total_pages as usize)
 }
 
 pub fn peek_header_from_bytes(data: &[u8]) -> Result<AeroHeader> {
@@ -285,7 +278,7 @@ pub fn peek_header_from_bytes(data: &[u8]) -> Result<AeroHeader> {
 
 pub fn finish_from_stream(stream: &[u8], password: &str) -> Result<DecodeOutcome> {
     let (h, payload) = split_header_and_payload(stream)?;
-    outcome(h, payload, password, None, false)
+    outcome(h, payload, password, None, false, 1, 1)
 }
 
 pub fn decode_apng_streams(streams: &[Vec<u8>], password: &str) -> Result<DecodeOutcome> {
@@ -302,13 +295,8 @@ pub fn decode_apng_streams(streams: &[Vec<u8>], password: &str) -> Result<Decode
     for (_, p) in pages { combined.extend_from_slice(&p); }
     let header = sample.unwrap();
     let declared = header.payload_size as usize;
-    if declared > 0 {
-        if combined.len() < declared {
-            return Err(anyhow!("incomplete stream: {} of {} bytes", combined.len(), declared));
-        }
-        combined.truncate(declared);
-    }
-    outcome(header, combined, password, None, false)
+    if declared > 0 && declared < combined.len() { combined.truncate(declared); }
+    outcome(header, combined, password, None, false, streams.len(), streams.len())
 }
 
 pub fn try_multi_recipient(
@@ -319,9 +307,7 @@ pub fn try_multi_recipient(
     let img = load_luma_from_bytes(data)?;
     let stream = recover_stream(&img)?;
     let (h, _) = split_header_and_payload(&stream)?;
-    if h.cipher != CipherKind::SealV2 {
-        return Err(anyhow!("not a SealV2 pattern"));
-    }
+    if h.cipher != CipherKind::SealV2 { return Err(anyhow!("not SealV2")); }
     let decrypted = crate::crypto::seal2::open_v2_multi(
         recipient_secret, recipient_public, &stream[AERO_HEADER_SIZE..],
     ).map_err(|e| anyhow!("multi-open: {}", e))?;
@@ -336,14 +322,15 @@ pub fn try_multi_recipient(
     }
     let hash_ok = constant_time_eq(&content_hash_8(&up), &h.content_hash);
     let sha = sha256_short(&up);
-    let created = {
-        let s = h.created_at_str();
-        if s == "unknown" { None } else { Some(s) }
-    };
+    let created = { let s = h.created_at_str(); if s == "unknown" { None } else { Some(s) } };
     Ok(DecodeOutcome {
         payload: up, header: h, sha256: sha, hash_ok,
         signature_ok: true, hmac_ok: true,
         original_filename: fname, created_at: created,
-        recovered_from_parity: false,
+        recovered_from_parity: false, pages_received: 1, pages_total: 1,
     })
 }
+
+// Silence unused import warning
+#[allow(dead_code)]
+fn _use_datatype() -> DataType { DataType::Text }

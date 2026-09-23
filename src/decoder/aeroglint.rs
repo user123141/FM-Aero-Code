@@ -1,8 +1,6 @@
-//! AeroGlint decoder (v2.3.2).
+//! AeroGlint decoder (v3.0).
 //!
-//! CRITICAL FIX: previous CFAR threshold (avg neighbors * 2.0) killed
-//! all data because QPSK symbols are uniform in magnitude. Replaced
-//! with median * 0.5 which correctly separates data from empty cells.
+//! Adds: gamma inverse, Sauvola adaptive threshold (pre-FFT), border strip.
 
 use anyhow::{anyhow, Result};
 use image::{GrayImage, imageops::FilterType};
@@ -13,22 +11,13 @@ use std::sync::{Arc, OnceLock};
 use crate::AEROGLINT_GRID;
 use crate::encoder::aeroglint::{data_cells, interleave_seed, PILOT_ANGLES};
 
+pub const BORDER_PX: u32 = 24;
+pub const BORDERED_GRID: u32 = 128 + 2 * BORDER_PX;
+
 pub struct DecodedGlint {
     pub stream: Vec<u8>,
     pub rotation_deg: f32,
     pub noise_floor: f32,
-}
-
-struct SplitMix64 { state: u64 }
-impl SplitMix64 {
-    fn new(seed: u64) -> Self { Self { state: seed } }
-    fn next(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    }
 }
 
 static FFT128_FWD: OnceLock<Arc<dyn Fft<f32>>> = OnceLock::new();
@@ -45,6 +34,18 @@ fn fft_forward_for(size: usize) -> Arc<dyn Fft<f32>> {
     }
 }
 
+struct SplitMix64 { state: u64 }
+impl SplitMix64 {
+    fn new(seed: u64) -> Self { Self { state: seed } }
+    fn next(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+}
+
 fn fft2d(matrix: &mut [Complex32], size: usize) {
     let fft = fft_forward_for(size);
     for y in 0..size {
@@ -58,7 +59,66 @@ fn fft2d(matrix: &mut [Complex32], size: usize) {
     }
 }
 
-/// Median magnitude across all non-DC cells.
+/// Apply inverse gamma: value^2.2.
+pub fn undo_gamma(img: &mut GrayImage) {
+    let gamma = 2.2f32;
+    for p in img.pixels_mut() {
+        let v = p.0[0] as f32 / 255.0;
+        let corrected = v.powf(gamma);
+        p.0[0] = (corrected * 255.0).clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// Sauvola adaptive threshold. Window w, k=0.34.
+/// Result: binary 0 or 255.
+pub fn sauvola_threshold(img: &GrayImage, w: u32, k: f32) -> GrayImage {
+    let width = img.width();
+    let height = img.height();
+    if width < w || height < w { return img.clone(); }
+    let r = (w / 2) as i32;
+    // Precompute integral image and squared
+    let mut integral = vec![0u64; ((width + 1) * (height + 1)) as usize];
+    let mut integral_sq = vec![0u64; ((width + 1) * (height + 1)) as usize];
+    for y in 0..height {
+        let mut row_sum: u64 = 0;
+        let mut row_sum_sq: u64 = 0;
+        for x in 0..width {
+            let v = img.get_pixel(x, y).0[0] as u64;
+            row_sum += v;
+            row_sum_sq += v * v;
+            integral[((y + 1) * (width + 1) + (x + 1)) as usize] =
+                integral[(y * (width + 1) + (x + 1)) as usize] + row_sum;
+            integral_sq[((y + 1) * (width + 1) + (x + 1)) as usize] =
+                integral_sq[(y * (width + 1) + (x + 1)) as usize] + row_sum_sq;
+        }
+    }
+    let mut out = GrayImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let x0 = (x as i32 - r).max(0) as u32;
+            let y0 = (y as i32 - r).max(0) as u32;
+            let x1 = (x as i32 + r).min(width as i32 - 1) as u32;
+            let y1 = (y as i32 + r).min(height as i32 - 1) as u32;
+            let area = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f32;
+            let sum = integral[((y1 + 1) * (width + 1) + (x1 + 1)) as usize]
+                + integral[(y0 * (width + 1) + x0) as usize]
+                - integral[(y0 * (width + 1) + (x1 + 1)) as usize]
+                - integral[((y1 + 1) * (width + 1) + x0) as usize];
+            let sum_sq = integral_sq[((y1 + 1) * (width + 1) + (x1 + 1)) as usize]
+                + integral_sq[(y0 * (width + 1) + x0) as usize]
+                - integral_sq[(y0 * (width + 1) + (x1 + 1)) as usize]
+                - integral_sq[((y1 + 1) * (width + 1) + x0) as usize];
+            let mean = sum as f32 / area;
+            let var = (sum_sq as f32 / area) - mean * mean;
+            let std = var.max(0.0).sqrt();
+            let threshold = mean * (1.0 + k * (std / 128.0 - 1.0));
+            let v = img.get_pixel(x, y).0[0] as f32;
+            out.put_pixel(x, y, image::Luma([if v > threshold { 255 } else { 0 }]));
+        }
+    }
+    out
+}
+
 fn median_amplitude(matrix: &[Complex32], size: usize) -> f32 {
     let c = size / 2;
     let mut amps: Vec<f32> = Vec::with_capacity(size * size);
@@ -75,8 +135,6 @@ fn median_amplitude(matrix: &[Complex32], size: usize) -> f32 {
     amps[amps.len() / 2]
 }
 
-/// RMS magnitude of all non-DC cells (better than median when most cells
-/// are empty). Used as fallback noise estimate.
 fn rms_amplitude(matrix: &[Complex32], size: usize) -> f32 {
     let c = size / 2;
     let mut sum = 0.0f64;
@@ -95,18 +153,11 @@ fn rms_amplitude(matrix: &[Complex32], size: usize) -> f32 {
     (sum / count as f64).sqrt() as f32
 }
 
-pub fn parabolic_offset(y1: f32, y2: f32, y3: f32) -> f32 {
-    let denom = y1 - 2.0 * y2 + y3;
-    if denom.abs() < 1e-9 { return 0.0; }
-    (0.5 * (y1 - y3) / denom).clamp(-0.5, 0.5)
-}
-
 fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
     let c = size as f32 / 2.0;
     let pilot_r = crate::encoder::aeroglint::PILOT_RADIUS_NORM * c;
     let pilot_r_sq = pilot_r * pilot_r;
     let band: f32 = (c * 0.20).powi(2);
-
     let mut candidates: Vec<(usize, usize, f32)> = Vec::new();
     for y in 0..size {
         for x in 0..size {
@@ -114,12 +165,10 @@ fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
             let dy = y as f32 - c;
             let r2 = dx * dx + dy * dy;
             if (r2 - pilot_r_sq).abs() > band { continue; }
-            let amp = matrix[y * size + x].norm();
-            candidates.push((x, y, amp));
+            candidates.push((x, y, matrix[y * size + x].norm()));
         }
     }
     candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-
     let mut peaks: Vec<(usize, usize, f32)> = Vec::new();
     for cand in candidates {
         let mut ok = true;
@@ -132,13 +181,11 @@ fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
         if peaks.len() >= 4 { break; }
     }
     if peaks.len() < 2 { return 0.0; }
-
     let mut expected_angles: Vec<f32> = Vec::new();
     for a in PILOT_ANGLES.iter() {
         expected_angles.push(*a);
         expected_angles.push(*a + std::f32::consts::PI);
     }
-
     let mut deltas: Vec<f32> = Vec::new();
     for &(px, py, _amp) in &peaks {
         let dx = px as f32 - c;
@@ -158,41 +205,46 @@ fn find_rotation(matrix: &[Complex32], size: usize) -> f32 {
     deltas[deltas.len() / 2]
 }
 
-pub fn decode_luma(luma: &GrayImage) -> Result<DecodedGlint> {
-    let size = AEROGLINT_GRID;
-    let resized = if luma.width() != size as u32 || luma.height() != size as u32 {
-        image::imageops::resize(luma, size as u32, size as u32, FilterType::Triangle)
-    } else {
-        luma.clone()
-    };
+/// Strip border if present.
+fn strip_border(img: &GrayImage) -> GrayImage {
+    if img.width() == BORDERED_GRID && img.height() == BORDERED_GRID {
+        return image::imageops::crop_imm(img, BORDER_PX, BORDER_PX, 128, 128).to_image();
+    }
+    img.clone()
+}
 
+pub fn decode_luma(luma: &GrayImage) -> Result<DecodedGlint> {
+    decode_luma_opts(luma, false)
+}
+
+pub fn decode_luma_opts(luma: &GrayImage, apply_sauvola: bool) -> Result<DecodedGlint> {
+    let size = AEROGLINT_GRID;
+    let stripped = strip_border(luma);
+    let pre_processed = if apply_sauvola {
+        sauvola_threshold(&stripped, 15, 0.34)
+    } else {
+        stripped
+    };
+    let resized = if pre_processed.width() != size as u32 || pre_processed.height() != size as u32 {
+        image::imageops::resize(&pre_processed, size as u32, size as u32, FilterType::Triangle)
+    } else {
+        pre_processed
+    };
     let mut sum = 0.0f64;
     for p in resized.pixels() { sum += p.0[0] as f64; }
     let mean = (sum / (size * size) as f64) as f32;
-
     let mut matrix: Vec<Complex32> = resized.pixels()
         .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
         .collect();
-
     fft2d(&mut matrix, size);
-
     let noise_floor = median_amplitude(&matrix, size);
     let rms = rms_amplitude(&matrix, size);
-
-    // Adaptive threshold: signal cells have magnitude ~1.41 (from QPSK).
-    // Empty cells have magnitude near 0. Set threshold at 0.5 * median
-    // so we correctly reject noise but keep QPSK.
     let robust = if noise_floor > 1e-6 { noise_floor } else { rms };
     let threshold = robust * 0.5;
-
     let mut rotation_rad = find_rotation(&matrix, size);
-    // Sanity: PNG-to-PNG has zero rotation. If detection claims > 15 deg,
-    // it's likely noise from data cell distribution. Zero it out.
     if rotation_rad.abs() > 0.262 {
         rotation_rad = 0.0;
     }
-
-    // Rotate spectrum back
     let mut compensated = vec![Complex32::new(0.0, 0.0); size * size];
     let c = size as f32 / 2.0;
     let cos_r = (-rotation_rad).cos();
@@ -208,7 +260,6 @@ pub fn decode_luma(luma: &GrayImage) -> Result<DecodedGlint> {
             }
         }
     }
-
     let cells = data_cells(size);
     let mut raw_bits: Vec<u8> = Vec::with_capacity(cells.len() * 2);
     for &(x, y) in &cells {
@@ -222,8 +273,6 @@ pub fn decode_luma(luma: &GrayImage) -> Result<DecodedGlint> {
             raw_bits.push(if v.im > 0.0 { 1 } else { 0 });
         }
     }
-
-    // De-interleave
     let mut perm: Vec<usize> = (0..cells.len() * 2).collect();
     let mut rng = SplitMix64::new(interleave_seed());
     for i in (1..perm.len()).rev() {
@@ -236,9 +285,7 @@ pub fn decode_luma(luma: &GrayImage) -> Result<DecodedGlint> {
             bits[perm[k]] = raw_bits[k];
         }
     }
-
     if bits.len() < 16 { return Err(anyhow!("not enough subcarriers")); }
-
     let mut out = Vec::with_capacity(bits.len() / 8);
     for chunk in bits.chunks(8) {
         if chunk.len() < 8 { break; }
@@ -248,7 +295,6 @@ pub fn decode_luma(luma: &GrayImage) -> Result<DecodedGlint> {
         }
         out.push(b);
     }
-
     Ok(DecodedGlint {
         stream: out,
         rotation_deg: rotation_rad.to_degrees(),

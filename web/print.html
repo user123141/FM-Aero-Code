@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FM Aero Code - Print</title>
+<style>
+@page { size: A4 portrait; margin: 8mm; }
+html, body { margin: 0; padding: 0; background: #f2f2f7; color: #000; font-family: -apple-system, sans-serif; }
+.toolbar { position: fixed; top: 0; left: 0; right: 0; padding: 12px; background: rgba(28,28,30,0.94); backdrop-filter: blur(14px); color: #fff; z-index: 100; display: flex; gap: 12px; align-items: center; }
+.toolbar label { font-size: 13px; }
+.toolbar input { padding: 6px 10px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; border-radius: 8px; font: 13px monospace; width: 100px; }
+.toolbar button { padding: 8px 18px; background: #0a84ff; color: #fff; border: 0; border-radius: 8px; font: 600 13px inherit; cursor: pointer; }
+.pages { padding-top: 70px; }
+.page { width: 190mm; height: 277mm; page-break-after: always; display: flex; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; padding: 5mm; background: #fff; margin: 8px auto; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+.page img { width: 180mm; height: 180mm; image-rendering: pixelated; }
+.label { font: 12px monospace; margin-top: 5mm; color: #333; }
+@media print { .toolbar { display: none; } .pages { padding-top: 0; } .page { box-shadow: none; margin: 0; } }
+</style>
+</head>
+<body>
+<div class="toolbar">
+<label>Pages: <input type="number" id="count" value="10" min="1" max="2000"></label>
+<label>Prefix: <input type="text" id="prefix" value="page" style="width: 200px"></label>
+<button onclick="load()">Load</button>
+<button onclick="window.print()">Print</button>
+</div>
+<div class="pages" id="pages"></div>
+<script>
+function load() {
+  var count = parseInt(document.getElementById("count").value);
+  var prefix = document.getElementById("prefix").value;
+  var container = document.getElementById("pages");
+  container.innerHTML = "";
+  for (var i = 0; i < count; i++) {
+    var idx = String(i).padStart(5, "0");
+    var div = document.createElement("div");
+    div.className = "page";
+    var img = document.createElement("img");
+    img.src = "pages/" + prefix + "_p" + idx + "_data.png";
+    img.onerror = function() {
+      var s = this.src;
+      this.onerror = null;
+      this.src = s.replace("_data.png", "_parity.png");
+    };
+    div.appendChild(img);
+    var label = document.createElement("div");
+    label.className = "label";
+    label.textContent = "Page " + (i+1) + " / " + count;
+    div.appendChild(label);
+    container.appendChild(div);
+  }
+}
+window.onload = load;
+</script>
+</body>
+</html>

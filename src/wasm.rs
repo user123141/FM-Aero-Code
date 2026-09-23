@@ -12,46 +12,66 @@ use image::GrayImage;
 pub fn wasm_init() { console_error_panic_hook::set_once(); }
 
 #[wasm_bindgen]
-pub fn wasm_version() -> String { "2.3.0".into() }
+pub fn wasm_version() -> String { "3.0.2".into() }
 
-fn encode_inner(data: &[u8], password: &str, filename: &str, logo: Option<Vec<u8>>) -> Vec<u8> {
-    let cipher = if password.is_empty() { CipherKind::None } else { CipherKind::SealV1 };
-    let opts = EncodeOptions {
-        cipher,
+fn base_opts(password: &str, filename: &str) -> EncodeOptions {
+    EncodeOptions {
+        cipher: if password.is_empty() { CipherKind::None } else { CipherKind::SealV1 },
         password: password.to_string(),
         pad: true,
         compression: CompressionMode::LosslessPriority,
         original_name: filename.to_string(),
-        center_logo: logo,
+        center_logo: None,
         signing_key: None,
         hmac_enabled: true,
         auto_lossless_media: true,
         recipient_key: None,
         recipients: Vec::new(),
         gps: None,
-        resilience: false,
-    };
-    let r = match encode_payload(data, &opts) { Ok(r) => r, Err(_) => return Vec::new() };
-    let mut png = Vec::new();
-    {
-        use image::ImageEncoder;
-        use image::codecs::png::PngEncoder;
-        if PngEncoder::new(&mut png)
-            .write_image(r.image.as_raw(), r.image.width(), r.image.height(),
-                image::ExtendedColorType::L8).is_err() { return Vec::new(); }
+        resilience_level: 0,
+        border: false,
+        gamma: false,
+        mask: false,
     }
-    png
 }
 
 #[wasm_bindgen]
 pub fn encode_payload_wasm(data: &[u8], password: &str, filename: &str) -> Vec<u8> {
-    encode_inner(data, password, filename, None)
+    let opts = base_opts(password, filename);
+    encode_to_png_or_apng(data, &opts)
 }
 
 #[wasm_bindgen]
-pub fn encode_with_logo_wasm(data: &[u8], password: &str, filename: &str, logo: &[u8]) -> Vec<u8> {
-    let l = if logo.is_empty() { None } else { Some(logo.to_vec()) };
-    encode_inner(data, password, filename, l)
+pub fn encode_payload_wasm_ex(
+    data: &[u8], password: &str, filename: &str,
+    resilience_level: u8, border: bool, gamma: bool, mask: bool,
+) -> Vec<u8> {
+    let mut opts = base_opts(password, filename);
+    opts.resilience_level = resilience_level;
+    opts.border = border;
+    opts.gamma = gamma;
+    opts.mask = mask;
+    encode_to_png_or_apng(data, &opts)
+}
+
+fn encode_to_png_or_apng(data: &[u8], opts: &EncodeOptions) -> Vec<u8> {
+    if let Ok(r) = encode_payload(data, opts) {
+        let mut png = Vec::new();
+        {
+            use image::ImageEncoder;
+            use image::codecs::png::PngEncoder;
+            if PngEncoder::new(&mut png)
+                .write_image(r.image.as_raw(), r.image.width(), r.image.height(),
+                    image::ExtendedColorType::L8).is_err() { return Vec::new(); }
+        }
+        return png;
+    }
+    if let Ok(f) = crate::encoder::pipeline::encode_aeroflow(data, opts) {
+        if let Ok(apng) = crate::encoder::apng::write_apng_to_vec(&f.frames, 4) {
+            return apng;
+        }
+    }
+    Vec::new()
 }
 
 #[wasm_bindgen]
@@ -147,16 +167,14 @@ impl WasmScanner {
                     let b64 = base64_encode(&r.payload);
                     let received = self.pages.len();
                     let total = self.total;
-                    let rot = self.last_rotation_deg;
-                    let noise = self.last_noise_floor;
                     self.reset();
                     return format!(
-                        r#"{{"ok":true,"name":"{}","type":"{}","sha":"{}","size":{},"rotation_deg":{:.2},"noise_floor":{:.4},"progress":"{}/{}","payload_b64":"{}"}}"#,
+                        r#"{{"ok":true,"name":"{}","type":"{}","sha":"{}","size":{},"progress":"{}/{}","payload_b64":"{}"}}"#,
                         json_escape(&r.original_filename),
                         r.header.data_type.label(),
                         r.sha256,
                         r.payload.len(),
-                        rot, noise, received, total,
+                        received, total,
                         b64,
                     );
                 }
@@ -164,9 +182,8 @@ impl WasmScanner {
             }
         }
         format!(
-            r#"{{"ok":false,"partial":true,"received":{},"total":{},"page_index":{},"rotation_deg":{:.2},"noise_floor":{:.4}}}"#,
+            r#"{{"ok":false,"partial":true,"received":{},"total":{},"page_index":{}}}"#,
             self.pages.len(), self.total, idx,
-            self.last_rotation_deg, self.last_noise_floor,
         )
     }
 }
@@ -202,49 +219,4 @@ fn base64_encode(data: &[u8]) -> String {
         out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
     }
     out
-}
-
-#[wasm_bindgen]
-pub fn encode_payload_wasm_ex(data: &[u8], password: &str, filename: &str, resilience: bool) -> Vec<u8> {
-    let cipher = if password.is_empty() { CipherKind::None } else { CipherKind::SealV1 };
-    let opts = EncodeOptions {
-        cipher,
-        password: password.to_string(),
-        pad: true,
-        compression: CompressionMode::LosslessPriority,
-        original_name: filename.to_string(),
-        center_logo: None,
-        signing_key: None,
-        hmac_enabled: true,
-        auto_lossless_media: true,
-        recipient_key: None,
-        recipients: Vec::new(),
-        gps: None,
-        resilience,
-    };
-    let r = match crate::encoder::pipeline::encode_payload(data, &opts) {
-        Ok(r) => r,
-        Err(_) => {
-            // Fall back to aeroflow (multi-page)
-            match crate::encoder::pipeline::encode_aeroflow(data, &opts) {
-                Ok(f) => {
-                    let apng = match crate::encoder::apng::write_apng_to_vec(&f.frames, 4) {
-                        Ok(b) => b,
-                        Err(_) => return Vec::new(),
-                    };
-                    return apng;
-                }
-                Err(_) => return Vec::new(),
-            }
-        }
-    };
-    let mut png = Vec::new();
-    {
-        use image::ImageEncoder;
-        use image::codecs::png::PngEncoder;
-        if PngEncoder::new(&mut png)
-            .write_image(r.image.as_raw(), r.image.width(), r.image.height(),
-                image::ExtendedColorType::L8).is_err() { return Vec::new(); }
-    }
-    png
 }

@@ -382,3 +382,55 @@ pub fn aero_unpack(packed: &[u8]) -> Result<Vec<u8>> {
     for b in blocks { out.extend_from_slice(&b); }
     Ok(out)
 }
+// ---------------------------------------------------------------------
+// v2.8.0: BCJ x86 filter (branch-call-jump normalization).
+// Normalizes relative x86 CALL/JMP instructions to absolute offsets,
+// making identical branch targets produce identical bytes. Improves
+// compression of EXE/DLL by ~10-15% before zstd.
+// ---------------------------------------------------------------------
+
+pub fn bcj_x86_enc(data: &mut [u8]) {
+    let n = data.len();
+    if n < 5 { return; }
+    let mut i = 0usize;
+    while i + 4 < n {
+        let b = data[i];
+        if b == 0xE8 || b == 0xE9 {
+            let rel = i32::from_le_bytes([data[i+1], data[i+2], data[i+3], data[i+4]]);
+            let abs = (i as i64 + 5 + rel as i64) as u32;
+            data[i+1] = abs as u8;
+            data[i+2] = (abs >> 8) as u8;
+            data[i+3] = (abs >> 16) as u8;
+            data[i+4] = (abs >> 24) as u8;
+            i += 5;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+pub fn bcj_x86_dec(data: &mut [u8]) {
+    let n = data.len();
+    if n < 5 { return; }
+    let mut i = 0usize;
+    while i + 4 < n {
+        let b = data[i];
+        if b == 0xE8 || b == 0xE9 {
+            let abs = u32::from_le_bytes([data[i+1], data[i+2], data[i+3], data[i+4]]);
+            let rel = (abs as i64 - (i as i64 + 5)) as u32;
+            data[i+1] = rel as u8;
+            data[i+2] = (rel >> 8) as u8;
+            data[i+3] = (rel >> 16) as u8;
+            data[i+4] = (rel >> 24) as u8;
+            i += 5;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Detect if data looks like a PE or ELF executable.
+pub fn looks_like_exe(data: &[u8]) -> bool {
+    if data.len() < 4 { return false; }
+    data.starts_with(b"MZ") || data.starts_with(&[0x7F, b'E', b'L', b'F'])
+}

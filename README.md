@@ -1,95 +1,128 @@
 # FM Aero Code 2
 
-Fast Memory optical storage via AeroGlint Spectrum Protocol.
+**Fast Memory optical storage.** Encode any file into a printable black-and-white pattern that survives camera capture.
 
-Encode any file into a printable pattern that survives camera capture.
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.8.3-brightgreen)]()
 
-Version: 2.4.0 | Author: Maksym Skorina | License: MIT
+---
 
-## Status
+## What it does
 
-- Core: 100% bit-perfect round-trip verified (9/9 selftests)
-- Tested payloads: empty, 1 B, 128 B, 500 B, 2 KB, 9 KB random, 1 MB MP3
-- Multi-page APNG works (3265 pages for 1 MB MP3)
-- Cross-platform: native (Windows/Linux/Mac) + WASM (browser)
+FM Aero Code converts arbitrary bytes into a spectral pattern:
 
-## How it works
+```
+file bytes
+  -> AeroPack v20 (BWT + MTF + RLE + DPCM adaptive)
+  -> AeroSeal v1/v2 (XChaCha20-Poly1305 + Argon2id, optional)
+  -> Reed-Solomon RS(255, 223) FEC
+  -> PRNG bit interleaving
+  -> QPSK onto 128x128 FFT grid (Hermitian symmetric)
+  -> 2D IFFT -> grayscale image
+  -> PNG (single) or APNG (multi-page)
+```
 
-    File
-      -> AeroPack v19 (BWT + MTF + RLE + DPCM adaptive per block)
-      -> AeroSeal v1/v2 (XChaCha20 + Argon2id, optional)
-      -> Reed-Solomon RS(255, 223) FEC
-      -> PRNG interleaving (SplitMix64)
-      -> QPSK onto 128x128 FFT grid (Hermitian symmetric)
-      -> 2D IFFT -> grayscale image
-      -> PNG (single page) or APNG (multi-page)
+Decoder reverses the pipeline: FFT -> pilot-ring rotation detect -> QPSK -> de-interleave -> RS decode -> decrypt -> unpack.
 
-Decoder reverses: FFT -> pilot-ring rotation detect -> QPSK -> de-interleave
--> RS decode -> decrypt -> unpack.
+## Features
 
-## Technology benchmarks
-
-Computed on AMD Ryzen 5 (16 threads), release mode, in-memory.
-
-| Payload | Size | AeroPack time | zstd-3 time | gzip-9 time |
-|---------|------|---------------|-------------|-------------|
-| text    | 16 KB  | 0.9 ms       | 0.2 ms      | 0.6 ms      |
-| text    | 256 KB | 14 ms        | 3.4 ms      | 9.2 ms      |
-| text    | 1 MB   | 58 ms        | 14 ms       | 38 ms       |
-| random  | 256 KB | 22 ms        | 2.1 ms      | 8.5 ms      |
-
-AeroPack is ~4x slower than zstd but usually produces smaller output on
-adversarial text data (BWT+MTF+RLE chain benefits from long-range patterns
-that zstd's LZ77 pass misses on short windows).
-
-Run `cargo bench` for your own numbers.
-
-## Capacity
-
-- Grid 128x128: ~2 KB per page
-- Grid 256x256: ~8 KB per page
-- APNG max pages: 65535 (~130 MB per pattern set)
-
-## Security
-
-- Argon2id: 32 MiB, t=3, p=2 (OWASP 2025 compliant, unified across platforms)
-- XChaCha20-Poly1305 AEAD, 24-byte nonce
-- HMAC-SHA256 encrypt-then-MAC
-- Constant-time MAC compare, zeroize on drop
-- No unsafe code
-
-See SECURITY.md for threat model, SPECIFICATION.md for wire format.
+- **Any file type**: text, music, photos, video, executables, archives
+- **Bit-perfect round-trip**: verified by 9/9 self-tests + 10,000 property-based tests
+- **Configurable resilience**: 5 levels from 0% to 50% page-loss recovery
+- **Cross-platform**: native GUI (Windows/Linux/macOS) + WASM (browser)
+- **Offline**: pure local, no network required
+- **Spectral camouflage**: optional logo overlay in low frequencies
 
 ## Quick start
 
-Native:
+Build native:
 
-    cargo build --release
-    .\target\release\fm_gui.exe
+```bash
+cargo build --release
+./target/release/fm_gui    # GUI
+./target/release/fm_selftest   # verify all round-trips
+```
 
-WASM:
+Build WASM (browser):
 
-    wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
-    cd web
-    python -m http.server 8080
+```bash
+wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+cd web && python -m http.server 8080
+```
 
 ## CLI
 
-    fm_encode in.jpg out.png --password mypass
-    fm_encode in.jpg out.png --recipient <64_hex_pubkey>
-    fm_decode out.png restored.jpg --password mypass
-    fm_decode out.png restored.jpg --secret <64_hex_secret>
-    fm_keygen write
-    fm_batch encode ./in ./out --password mypass --recursive --jobs 8
-    fm_batch decode ./patterns ./restored --recursive
-    fm_selftest
+```bash
+# Encode single-page
+fm_encode photo.jpg photo.aero.png --password mypass
 
-## Tests
+# Encode with 25% resilience (recover up to 50 lost pages per group)
+fm_split book.pdf ./pages --resilience 3
 
-    cargo test
+# Decode
+fm_decode photo.aero.png restored.jpg --password mypass
 
-Property-based tests (proptest) verify 10,000 random payloads.
+# Batch process folders
+fm_batch encode ./in ./out --password mypass --recursive --jobs 8
+
+# Generate keypair
+fm_keygen write
+```
+
+## Project structure
+
+```
+src/
+  lib.rs                - crate root
+  error.rs              - error types
+  types.rs              - AeroHeader, DataType, ResilienceLevel
+  fec.rs                - Reed-Solomon wrapper
+  resilience.rs         - page-level RS (multi-level)
+  selftest.rs           - round-trip verification
+  crypto/               - AeroSeal v1/v2, Argon2id, Ed25519
+  encoder/              - AeroPack, AeroGlint FFT encoder
+  decoder/              - FFT decoder, QPSK, pilot detection
+  app.rs                - egui GUI
+  icon.rs               - application icon
+  wasm.rs               - WASM bindings
+  bin/                  - CLI tools
+web/
+  index.html            - scanner + encoder UI
+  print.html            - print pages to A4
+  sw.js                 - service worker (offline)
+  manifest.json         - PWA manifest
+tests/
+  property_tests.rs     - proptest (10,000 cases)
+benches/
+  aeropack_bench.rs     - criterion benchmarks
+```
+
+## Security
+
+- Argon2id (32 MiB, t=3, p=2) - same parameters on all platforms
+- XChaCha20-Poly1305 (24-byte nonce) - encrypt-then-MAC
+- HMAC-SHA256 for header + payload integrity
+- Ed25519 optional signatures
+- `zeroize` scrubbing of key material
+- `#![forbid(unsafe_code)]`
+
+See [SECURITY.md](SECURITY.md) for threat model.
+
+## Resilience levels
+
+| Level | Data/Parity | Recovery | Size overhead |
+|-------|-------------|----------|---------------|
+| Off   | 200/0       | 0%       | +0%           |
+| Low   | 190/10      | 5%       | +5%           |
+| Balanced | 180/20   | 10%      | +11%          |
+| High  | 150/50      | 25%      | +33%          |
+| Extreme | 100/100   | 50%      | +100%         |
 
 ## License
 
-MIT. See LICENSE.
+MIT. See [LICENSE](LICENSE).
+
+---
+
+Author: Maksym Skorina

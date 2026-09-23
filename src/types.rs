@@ -1,4 +1,3 @@
-use sha2::{Digest, Sha256};
 pub const AERO_MAGIC: [u8; 3] = *b"FM2";
 pub const AERO_VERSION: u8 = 2;
 pub const AERO_HEADER_SIZE: usize = 128;
@@ -8,6 +7,37 @@ pub const HEADER_FLAG_MULTIPAGE: u8 = 1 << 1;
 pub const HEADER_FLAG_NAMED:     u8 = 1 << 3;
 pub const HEADER_FLAG_SIGNED:    u8 = 1 << 5;
 pub const HEADER_FLAG_HMAC:      u8 = 1 << 6;
+pub const HEADER_FLAG_GAMMA:     u8 = 1 << 7;
+
+/// Resilience level (data/parity split per group).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResilienceLevel { Off = 0, Low = 1, Balanced = 2, High = 3, Extreme = 4 }
+
+impl ResilienceLevel {
+    pub fn from_u8(v: u8) -> Self {
+        match v { 1 => Self::Low, 2 => Self::Balanced, 3 => Self::High, 4 => Self::Extreme, _ => Self::Off }
+    }
+    pub fn as_u8(self) -> u8 { self as u8 }
+    pub fn split(self) -> (usize, usize) {
+        match self {
+            Self::Off      => (200, 0),
+            Self::Low      => (190, 10),
+            Self::Balanced => (180, 20),
+            Self::High     => (150, 50),
+            Self::Extreme  => (100, 100),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off      => "Off",
+            Self::Low      => "Low (5%)",
+            Self::Balanced => "Balanced (10%)",
+            Self::High     => "High (25%)",
+            Self::Extreme  => "Extreme (50%)",
+        }
+    }
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +78,7 @@ impl DataType {
         Self::Raw
     }
 }
+
 fn likely_text(d: &[u8]) -> bool {
     let n = d.len().min(2048);
     if n == 0 { return false; }
@@ -60,7 +91,7 @@ fn likely_text(d: &[u8]) -> bool {
 pub enum CompressionKind { AeroPack = 0 }
 impl CompressionKind {
     pub fn from_byte(_b: u8) -> Self { Self::AeroPack }
-    pub fn label(&self) -> &'static str { "AeroPack v19" }
+    pub fn label(&self) -> &'static str { "AeroPack v20" }
 }
 
 pub fn now_unix() -> u32 {
@@ -107,6 +138,8 @@ pub struct AeroHeader {
     pub hmac: [u8; 16],
     pub reserved: [u8; 4],
     pub page_crc: u32,
+    pub resilience_level: u8,
+    pub mask: u8,
 }
 
 impl AeroHeader {
@@ -120,7 +153,8 @@ impl AeroHeader {
             data_type: dt, compression: ck, cipher: ci, flags,
             original_size: os, payload_size: ps, checksum: 0,
             page_index: pi, page_total: pt, content_hash: ch,
-            signature: [0u8; 64], hmac: [0u8; 16], reserved: [0u8; 4], page_crc: 0,
+            signature: [0u8; 64], hmac: [0u8; 16], reserved: [0u8; 4],
+            page_crc: 0, resilience_level: 0, mask: 0,
         };
         let ts = now_unix();
         h.reserved.copy_from_slice(&ts.to_le_bytes());
@@ -158,6 +192,8 @@ impl AeroHeader {
         b[94..110].copy_from_slice(&self.hmac);
         b[110..114].copy_from_slice(&self.reserved);
         b[114..118].copy_from_slice(&self.page_crc.to_le_bytes());
+        b[118] = self.resilience_level;
+        b[119] = self.mask;
         b
     }
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
@@ -178,22 +214,21 @@ impl AeroHeader {
         let mut hmac = [0u8; 16]; hmac.copy_from_slice(&b[94..110]);
         let mut reserved = [0u8; 4]; reserved.copy_from_slice(&b[110..114]);
         let page_crc = u32::from_le_bytes([b[114], b[115], b[116], b[117]]);
+        let resilience_level = b[118];
+        let mask = b[119];
         let h = Self {
             data_type: dt, compression: ck, cipher: ci, flags,
             original_size: os, payload_size: ps, checksum: cs,
             page_index: pi, page_total: pt, content_hash: ch,
-            signature: sig, hmac, reserved, page_crc,
+            signature: sig, hmac, reserved, page_crc, resilience_level, mask,
         };
         if h.compute_checksum() != cs { return None; }
         Some(h)
     }
-
-    /// Bytes that participate in HMAC and Ed25519 signature.
-    /// Zeroes volatile fields (hmac, reserved/timestamp, page_crc, padding)
-    /// so encoder (before HMAC set) and decoder (after HMAC set) agree.
     pub fn hmac_input(&self) -> Vec<u8> {
         let mut b = self.to_bytes();
-        for i in 94..128 { b[i] = 0; }
+        for i in 94..110 { b[i] = 0; }
+        for i in 114..118 { b[i] = 0; }
         b
     }
     pub fn created_at(&self) -> u32 {
@@ -216,13 +251,4 @@ pub fn fnv16(data: &[u8]) -> u16 {
     let mut h: u32 = 0x811C9DC5;
     for &b in data { h ^= b as u32; h = h.wrapping_mul(0x01000193); }
     ((h >> 16) ^ (h & 0xFFFF)) as u16
-}
-/// First 16 bytes of SHA-256. Replaces fnv16 for cryptographic header integrity.
-pub fn sha256_16(data: &[u8]) -> [u8; 16] {
-    let mut h = Sha256::new();
-    h.update(data);
-    let full = h.finalize();
-    let mut o = [0u8; 16];
-    o.copy_from_slice(&full[..16]);
-    o
 }

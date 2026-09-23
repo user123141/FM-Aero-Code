@@ -20,9 +20,8 @@ pub struct SelfTestReport {
     pub multi_page: bool,
 }
 
-fn build_opts(payload_len: usize, password: &str, name: &str) -> EncodeOptions {
+fn build_opts(password: &str, name: &str) -> EncodeOptions {
     let cipher = if password.is_empty() { CipherKind::None } else { CipherKind::SealV1 };
-    let _ = payload_len;
     EncodeOptions {
         cipher,
         password: password.to_string(),
@@ -36,14 +35,16 @@ fn build_opts(payload_len: usize, password: &str, name: &str) -> EncodeOptions {
         recipient_key: None,
         recipients: Vec::new(),
         gps: None,
-        resilience: false,
+        resilience_level: 0,
+        border: false,
+        gamma: false,
+        mask: false,
     }
 }
 
 pub fn roundtrip(payload: &[u8], password: &str) -> Result<SelfTestReport> {
-    let opts = build_opts(payload.len(), password, "selftest.bin");
+    let opts = build_opts(password, "selftest.bin");
 
-    // Try single-page first
     match encode_payload(payload, &opts) {
         Ok(enc) => {
             let (w, h) = (enc.image.width(), enc.image.height());
@@ -62,10 +63,9 @@ pub fn roundtrip(payload: &[u8], password: &str) -> Result<SelfTestReport> {
                 multi_page: false,
             });
         }
-        Err(_) => { /* fall through to multi-page */ }
+        Err(_) => { /* fall through */ }
     }
 
-    // Multi-page AeroFlow
     let flow = encode_aeroflow(payload, &opts)?;
     let apng = write_apng_to_vec(&flow.frames, 4)?;
     let dec = decode_from_bytes(&apng, password, None)?;

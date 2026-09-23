@@ -1,4 +1,4 @@
-const CACHE = "fmaero2-2.3.1";
+const CACHE = "fmaero2-3.0.2";
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(["./", "./index.html", "./manifest.json"])));
 });

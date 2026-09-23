@@ -8,7 +8,7 @@ Thumbs.db
 node_modules
 fm_recipients.json
 FM.ps1
+.backup_*
 *.bak
-old_backup_*
-.backup_*/
-*.backup_*
+pages/
+web/pages/
