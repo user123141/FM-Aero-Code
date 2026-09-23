@@ -1,4 +1,6 @@
 use anyhow::{anyhow, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use ed25519_dalek::SigningKey;
 
 use crate::crypto::{CipherKind, content_hash_8, hmac_sha256, seal, seal2, sign_header, SealMode};
@@ -288,6 +290,7 @@ pub fn encode_payload(payload: &[u8], opts: &EncodeOptions) -> Result<EncodeOutc
     framed.extend_from_slice(&header.to_bytes());
     framed.extend_from_slice(&p.stream);
     let image = encode_glint(&framed, opts, logo.as_ref())?;
+    let _ = verify_roundtrip(&image, &opts.password)?;
     let ratio = if !p.stream.is_empty() { payload.len() as f64 / p.stream.len() as f64 } else { 1.0 };
     Ok(EncodeOutcome {
         image,
@@ -390,4 +393,19 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
         data_pages_per_group: data_pg,
         parity_pages_per_group: par_pg,
     })
+}
+
+fn verify_roundtrip(image: &image::GrayImage, password: &str) -> Result<Vec<u8>> {
+    use image::ImageEncoder;
+    use image::codecs::png::PngEncoder;
+    let (w, h) = (image.width(), image.height());
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(image.as_raw(), w, h, image::ExtendedColorType::L8)
+        .map_err(|e| anyhow!("verify png: {}", e))?;
+    let dec = crate::decoder::pipeline::decode_from_bytes(&png, password, None)?;
+    if !dec.hash_ok {
+        return Err(anyhow!("verify: hash mismatch after encode"));
+    }
+    Ok(dec.payload)
 }

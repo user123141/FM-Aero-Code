@@ -15,7 +15,7 @@ pub const GUARD_OUTER: f32 = 0.85;
 pub const PILOT_RADIUS_NORM: f32 = 0.50;
 
 /// Central logo square side, in cells. 40 cells = 31% width.
-pub const LOGO_SIZE: u32 = 40;
+pub const LOGO_SIZE: u32 = 32;
 
 pub const PILOT_ANGLES: [f32; 4] = [
     std::f32::consts::PI / 6.0,
@@ -182,30 +182,72 @@ fn build_spectral_photo(size: usize, photo: &GrayImage) -> Vec<Complex32> {
     m
 }
 
-/// Spatial overlay of logo into center square with thin black border.
+fn gaussian_blur(img: &GrayImage, radius: f32) -> GrayImage {
+    let sigma = radius.max(0.5);
+    let k = (2.0 * sigma).ceil() as i32;
+    let mut kernel = Vec::with_capacity((2 * k + 1) as usize);
+    let mut sum = 0.0f32;
+    for i in -k..=k {
+        let v = (-(i as f32).powi(2) / (2.0 * sigma * sigma)).exp();
+        kernel.push(v);
+        sum += v;
+    }
+    for v in kernel.iter_mut() { *v /= sum; }
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let mut tmp = GrayImage::new(img.width(), img.height());
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            for i in -k..=k {
+                let sx = (x + i).clamp(0, w - 1) as u32;
+                acc += img.get_pixel(sx, y as u32).0[0] as f32 * kernel[(i + k) as usize];
+            }
+            tmp.put_pixel(x as u32, y as u32, Luma([acc.clamp(0.0, 255.0) as u8]));
+        }
+    }
+    let mut out = GrayImage::new(img.width(), img.height());
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            for i in -k..=k {
+                let sy = (y + i).clamp(0, h - 1) as u32;
+                acc += tmp.get_pixel(x as u32, sy).0[0] as f32 * kernel[(i + k) as usize];
+            }
+            out.put_pixel(x as u32, y as u32, Luma([acc.clamp(0.0, 255.0) as u8]));
+        }
+    }
+    out
+}
+/// Spatial overlay of logo into center square.
+/// Logo edges are feathered (gaussian blur) so the sharp boundary does not
+/// create FFT ringing that corrupts the QPSK data cells.
 fn overlay_center_logo(img: &mut GrayImage, logo: &GrayImage) {
     let (lc0, lc1, lr0, lr1) = logo_bounds(img.width() as usize);
     let lw = lc1 - lc0;
     let lh = lr1 - lr0;
-    let resized = image::imageops::resize(logo, lw as u32, lh as u32, FilterType::Lanczos3);
-    // White fill (so logos with transparent bg are visible)
-    for y in lr0..lr1 {
-        for x in lc0..lc1 {
-            img.put_pixel(x as u32, y as u32, Luma([255]));
+    // Pad with white padding ring around the resized logo
+    let padded = {
+        let mut p = GrayImage::new((lw + 4) as u32, (lh + 4) as u32);
+        for px in p.pixels_mut() { px.0[0] = 255; }
+        let inner = image::imageops::resize(logo, lw as u32, lh as u32, FilterType::Lanczos3);
+        for y in 0..lh {
+            for x in 0..lw {
+                let sp = inner.get_pixel(x as u32, y as u32);
+                p.put_pixel((x + 2) as u32, (y + 2) as u32, *sp);
+            }
         }
-    }
-    // Copy resized logo with 1-pixel black frame
+        p
+    };
+    // Feather edges: blur radius ~2 cells, then crop back
+    let feathered = gaussian_blur(&padded, 1.5);
+    // Blend into img with soft boundary
     for y in 0..lh {
         for x in 0..lw {
-            let is_edge = x == 0 || y == 0 || x == lw - 1 || y == lh - 1;
             let px = (lc0 + x) as u32;
             let py = (lr0 + y) as u32;
-            if is_edge {
-                img.put_pixel(px, py, Luma([0]));
-            } else {
-                let sp = resized.get_pixel(x as u32, y as u32);
-                img.put_pixel(px, py, *sp);
-            }
+            // Sample from padded+blurred with offset
+            let sp = feathered.get_pixel((x + 2) as u32, (y + 2) as u32);
+            img.put_pixel(px, py, *sp);
         }
     }
 }

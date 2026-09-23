@@ -9,6 +9,7 @@ use crate::crypto::{generate_recipient, CipherKind};
 use crate::decoder::pipeline::{decode_from_bytes, peek_header_from_bytes};
 use crate::encoder::apng::write_apng_to_vec;
 use crate::encoder::pipeline::{encode_aeroflow, encode_payload, CompressionMode, EncodeOptions};
+use crate::settings::Settings;
 use crate::types::DataType;
 use crate::VERSION;
 
@@ -30,6 +31,9 @@ impl PrintKind {
         match self { Self::Png => "png", Self::Html => "html", Self::Svg => "svg", Self::Pdf => "pdf" }
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrintSize { A4, Letter, Legal }
 
 enum Msg {
     Log(String),
@@ -89,12 +93,10 @@ pub struct FmAeroApp {
     decoded: Option<DecodedView>,
     zoom: f32,
     pan: Vec2,
+    settings: Settings,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
 }
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PrintSize { A4, Letter, Legal }
 
 impl FmAeroApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -105,13 +107,23 @@ impl FmAeroApp {
         v.selection.bg_fill = Color32::from_rgb(10, 132, 255);
         cc.egui_ctx.set_visuals(v);
         let (tx, rx) = channel();
+        let settings = Settings::load();
+        let cipher = match settings.cipher_kind {
+            2 => CipherKind::SealV2,
+            1 => CipherKind::SealV1,
+            _ => CipherKind::SealV1,
+        };
         Self {
             input: String::new(),
             text_payload: "Hello, FM Aero Code 2!".into(),
             password: String::new(),
-            cipher: CipherKind::SealV1,
-            use_encryption: false,
-            compression: CompressionMode::LosslessPriority,
+            cipher,
+            use_encryption: settings.cipher_kind != 0,
+            compression: match settings.compression {
+                0 => CompressionMode::Auto,
+                1 => CompressionMode::Lossless,
+                _ => CompressionMode::LosslessPriority,
+            },
             use_recipient: false,
             recipient_pub: String::new(),
             recipient_pub_gen: String::new(),
@@ -119,8 +131,8 @@ impl FmAeroApp {
             show_secret: false,
             photo_bytes: None,
             photo_name: String::new(),
-            resilience_level: 0,
-            border: false,
+            resilience_level: settings.resilience,
+            border: settings.border,
             gamma: false,
             mask: false,
             print_size: PrintSize::A4,
@@ -139,6 +151,7 @@ impl FmAeroApp {
             decoded: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
+            settings,
             rx, tx,
         }
     }
@@ -149,6 +162,23 @@ impl FmAeroApp {
             let n = self.log.len() - 500;
             self.log.drain(0..n);
         }
+    }
+
+    fn save_settings(&mut self) {
+        self.settings.cipher_kind = if self.use_encryption {
+            match self.cipher {
+                CipherKind::SealV2 => 2,
+                _ => 1,
+            }
+        } else { 0 };
+        self.settings.compression = match self.compression {
+            CompressionMode::Auto => 0,
+            CompressionMode::Lossless => 1,
+            CompressionMode::LosslessPriority => 2,
+        };
+        self.settings.resilience = self.resilience_level;
+        self.settings.border = self.border;
+        self.settings.save();
     }
 
     fn encode(&mut self) {
@@ -172,6 +202,10 @@ impl FmAeroApp {
         let border = self.border;
         let gamma = self.gamma;
         let mask = self.mask;
+        if !self.input.is_empty() {
+            self.settings.add_recent(&self.input);
+        }
+        self.save_settings();
         let tx = self.tx.clone();
         self.busy = true;
         self.push(format!("Encoding {} ({} B)...", name, data.len()));
@@ -293,7 +327,8 @@ impl FmAeroApp {
             PrintSize::Letter => crate::encoder::print::PageSize::Letter,
             PrintSize::Legal => crate::encoder::print::PageSize::Legal,
         };
-        let out_name = format!("{}.{}", name.trim_end_matches(".png").trim_end_matches(".apng.png"), kind.ext());
+        let stem = name.trim_end_matches(".png").trim_end_matches(".apng.png");
+        let out_name = format!("{}.{}", stem, kind.ext());
         let Some(path) = rfd::FileDialog::new().set_file_name(&out_name).save_file() else {
             return;
         };
@@ -395,12 +430,49 @@ impl FmAeroApp {
         if self.busy { ctx.request_repaint_after(Duration::from_millis(80)); }
     }
 
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let (ctrl_e, ctrl_d, ctrl_s, ctrl_o) = ctx.input(|i| (
+            i.modifiers.ctrl && i.key_pressed(egui::Key::E),
+            i.modifiers.ctrl && i.key_pressed(egui::Key::D),
+            i.modifiers.ctrl && i.key_pressed(egui::Key::S),
+            i.modifiers.ctrl && i.key_pressed(egui::Key::O),
+        ));
+        if ctrl_o {
+            if let Some(p) = rfd::FileDialog::new().pick_file() {
+                self.input = p.display().to_string();
+            }
+        }
+        if ctrl_e && !self.busy {
+            let ready = !self.input.is_empty() || !self.text_payload.is_empty();
+            if ready { self.encode(); }
+        }
+        if ctrl_d && !self.busy && !self.input.is_empty() {
+            self.decode_from_file();
+        }
+        if ctrl_s && !self.busy {
+            if let Some((bytes, name, _)) = self.encoded.clone() {
+                if let Some(p) = rfd::FileDialog::new().set_file_name(&name).save_file() {
+                    if std::fs::write(&p, &bytes).is_ok() {
+                        self.push(format!("saved {}", p.display()));
+                    }
+                }
+            }
+        }
+        let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
+        if let Some(f) = dropped.first() {
+            if let Some(p) = &f.path {
+                self.input = p.display().to_string();
+                self.push(format!("dropped: {}", self.input));
+            }
+        }
+    }
+
     fn ui_side(&mut self, ui: &mut egui::Ui) {
         ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(6.0);
             ui.heading("Source");
             ui.horizontal(|ui| {
-                if ui.button("Browse...").clicked() {
+                if ui.button("Browse (Ctrl+O)").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_file() {
                         self.input = p.display().to_string();
                     }
@@ -408,13 +480,28 @@ impl FmAeroApp {
                 if ui.button("Clear").clicked() { self.input.clear(); }
             });
             ui.add(egui::TextEdit::singleline(&mut self.input)
-                .hint_text("path or drop file").desired_width(f32::INFINITY));
+                .hint_text("path or drag file here").desired_width(f32::INFINITY));
+
+            if !self.settings.recent_files.is_empty() && self.input.is_empty() {
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Recent:").weak());
+                    let recent_clone: Vec<String> = self.settings.recent_files.clone();
+                    for path in recent_clone.iter() {
+                        let label = Path::new(path).file_name()
+                            .and_then(|n| n.to_str()).unwrap_or(path.as_str()).to_string();
+                        if ui.small_button(label).clicked() {
+                            self.input = path.clone();
+                        }
+                    }
+                });
+            }
+
             ui.add_space(4.0);
             ui.label(RichText::new("Or type text:").weak());
             ui.add(egui::TextEdit::multiline(&mut self.text_payload)
                 .desired_rows(3).desired_width(f32::INFINITY));
 
-            // ============ ENCRYPT ============
             ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
@@ -423,9 +510,9 @@ impl FmAeroApp {
             });
             if self.use_encryption {
                 let mode_label = if self.use_recipient && !self.recipient_pub.is_empty() {
-                    "AeroSeal v2 (recipient X25519)"
+                    "AeroSeal v2 (recipient)"
                 } else if self.cipher == CipherKind::SealV2 {
-                    "AeroSeal v2 (single)"
+                    "AeroSeal v2"
                 } else {
                     "AeroSeal v1 (password)"
                 };
@@ -447,8 +534,9 @@ impl FmAeroApp {
                 });
                 ui.label(RichText::new("Password").weak());
                 ui.horizontal(|ui| {
+                    let w = ui.available_width() - 60.0;
                     ui.add(egui::TextEdit::singleline(&mut self.password)
-                        .password(true).desired_width(ui.available_width() - 60.0)
+                        .password(true).desired_width(w)
                         .hint_text("password"));
                     if ui.small_button("Copy").clicked() {
                         let pw = self.password.clone();
@@ -462,7 +550,6 @@ impl FmAeroApp {
                 }
             }
 
-            // ============ COMPRESSION ============
             ui.add_space(8.0);
             ui.separator();
             ui.heading("Compression");
@@ -474,7 +561,6 @@ impl FmAeroApp {
                     ui.selectable_value(&mut self.compression, CompressionMode::Lossless, "Lossless");
                 });
 
-            // ============ TRANSPORT ============
             ui.add_space(8.0);
             ui.separator();
             ui.heading("Transport");
@@ -497,7 +583,6 @@ impl FmAeroApp {
             });
             ui.checkbox(&mut self.border, "Detection border (camera / print)");
 
-            // ============ LOGO ============
             ui.add_space(8.0);
             ui.separator();
             ui.heading("Center logo");
@@ -524,20 +609,19 @@ impl FmAeroApp {
                 }
             });
 
-            // ============ ACTIONS ============
             ui.add_space(12.0);
             ui.separator();
             let ready = !self.input.is_empty() || !self.text_payload.is_empty();
             ui.add_enabled_ui(ready && !self.busy, |ui| {
                 if ui.add_sized([ui.available_width(), 38.0],
-                    egui::Button::new(RichText::new("ENCODE").strong())).clicked() {
+                    egui::Button::new(RichText::new("ENCODE (Ctrl+E)").strong())).clicked() {
                     self.encode();
                 }
             });
             let can_decode = !self.input.is_empty() && !self.busy;
             ui.add_enabled_ui(can_decode, |ui| {
                 if ui.add_sized([ui.available_width(), 38.0],
-                    egui::Button::new("DECODE file")).clicked() {
+                    egui::Button::new("DECODE file (Ctrl+D)")).clicked() {
                     self.decode_from_file();
                 }
             });
@@ -557,7 +641,7 @@ impl FmAeroApp {
                     if is_apng { "APNG" } else { "PNG" },
                     name, bytes.len() as f64 / 1024.0)).weak());
                 if ui.add_sized([ui.available_width(), 34.0],
-                    egui::Button::new("Save PNG...")).clicked() {
+                    egui::Button::new("Save PNG (Ctrl+S)")).clicked() {
                     if let Some(p) = rfd::FileDialog::new()
                         .set_file_name(&name).save_file()
                     {
@@ -567,7 +651,6 @@ impl FmAeroApp {
                     }
                 }
 
-                // ============ PRINT ============
                 ui.add_space(6.0);
                 ui.label(RichText::new("Print for A4:").strong());
                 ui.horizontal(|ui| {
@@ -720,22 +803,16 @@ impl FmAeroApp {
                 ui.add_space(8.0);
                 ui.label("Fast Memory optical storage via AeroGlint Spectrum Protocol.");
                 ui.add_space(8.0);
-                ui.label(RichText::new("Technologies:").strong());
-                ui.label("- AeroPack v20 (BWT+MTF+RLE+DPCM3+BCJ)");
-                ui.label("- AeroGlint Spectrum (2D OFDM over FFT)");
-                ui.label("- Reed-Solomon RS(255,223) FEC + page-level resilience");
-                ui.label("- AeroSeal v1 (XChaCha20+Argon2id+HMAC)");
-                ui.label("- AeroSeal v2 (X25519 ephemeral)");
-                ui.label("- Ed25519 signatures");
-                ui.label("- Center logo (spatial overlay in low-freq)");
-                ui.label("- Detection border for camera");
+                ui.label(RichText::new("Keyboard shortcuts:").strong());
+                ui.label("Ctrl+O - open file");
+                ui.label("Ctrl+E - encode");
+                ui.label("Ctrl+D - decode");
+                ui.label("Ctrl+S - save pattern");
+                ui.label("Drag file into window - set as input");
                 ui.add_space(8.0);
                 if ui.button("Open GitHub repo").clicked() {
                     let _ = webbrowser::open("https://github.com/user123141/FM-Aero-Code");
                 }
-                ui.add_space(8.0);
-                ui.label(RichText::new("Offline PWA: open the web UI and use your browser's").weak());
-                ui.label(RichText::new("\"Install app\" / \"Add to Home Screen\" option.").weak());
             }
         }
     }
@@ -774,6 +851,7 @@ fn decode_worker(bytes: Vec<u8>, pw: String, tx: Sender<Msg>) {
 
 impl eframe::App for FmAeroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_shortcuts(ctx);
         self.poll(ctx);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {

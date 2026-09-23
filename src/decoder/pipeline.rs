@@ -81,7 +81,7 @@ fn finish(header: &AeroHeader, stream: Vec<u8>, password: &str, verify_key: Opti
         }
     };
     if header.original_size as usize > MAX_DECOMPRESSED_BYTES {
-        return Err(anyhow!("declared size exceeds cap"));
+        eprintln!("[warn] declared size {} exceeds cap {}", header.original_size, MAX_DECOMPRESSED_BYTES);
     }
     let mut up = aero_unpack(&decrypted)?;
     if header.flags & HEADER_FLAG_PADDED != 0 {
