@@ -254,3 +254,20 @@ pub fn fnv16(data: &[u8]) -> u16 {
     for &b in data { h ^= b as u32; h = h.wrapping_mul(0x01000193); }
     ((h >> 16) ^ (h & 0xFFFF)) as u16
 }
+
+
+/// Format byte count as human-readable: 123 B, 4.5 KB, 1.2 MB etc.
+pub fn human_bytes(b: usize) -> String {
+    const U: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut x = b as f64;
+    let mut i = 0usize;
+    while x >= 1024.0 && i < U.len() - 1 {
+        x /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", b, U[0])
+    } else {
+        format!("{:.2} {}", x, U[i])
+    }
+}

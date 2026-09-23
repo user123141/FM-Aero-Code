@@ -213,7 +213,7 @@ impl FmAeroApp {
         let tx = self.tx.clone();
         self.busy = true;
         self.op_started = Some(Instant::now());
-        self.push(format!("Encoding {} ({} B)...", name, data.len()));
+        self.push(format!("Encoding {} ({})...", name, crate::types::human_bytes(data.len())));
         std::thread::spawn(move || {
             let opts = EncodeOptions {
                 cipher,
@@ -247,8 +247,8 @@ impl FmAeroApp {
                             r.image.as_raw(), w, h, image::ExtendedColorType::L8);
                     }
                     let _ = tx.send(Msg::Log(format!(
-                        "Encoded single-page: {}x{} | input {} B -> PNG {} B",
-                        w, h, r.payload_bytes, png.len())));
+                        "Encoded single-page: {}x{} | {} -> {}",
+                        w, h, crate::types::human_bytes(r.payload_bytes), crate::types::human_bytes(png.len()))));
                     let _ = tx.send(Msg::Preview {
                         frames: vec![(px, w, h)],
                         bytes: png,
@@ -273,8 +273,8 @@ impl FmAeroApp {
                                         frames_px.push((px, w, h));
                                     }
                                     let _ = tx.send(Msg::Log(format!(
-                                        "Encoded APNG {} pages | input {} B -> APNG {} B",
-                                        page_count, f.payload_bytes, apng.len())));
+                                        "Encoded APNG {} pages | {} -> {}",
+                                        page_count, crate::types::human_bytes(f.payload_bytes), crate::types::human_bytes(apng.len()))));
                                     let _ = tx.send(Msg::Preview {
                                         frames: frames_px,
                                         bytes: apng,

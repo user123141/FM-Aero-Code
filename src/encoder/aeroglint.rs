@@ -1,8 +1,7 @@
-//! AeroGlint encoder (v3.5.1).
+//! AeroGlint encoder (v3.6.0).
 //!
-//! Photo layout:
-//!   - Spectral background: low-freq band (subtle atmospheric layer)
-//!   - Center spatial logo: hard-edged 40x40 cells (guaranteed visible)
+//! Photo lives in LOW frequencies only (r < GUARD_INNER). No spatial overlay
+//! because sharp edges create broadband FFT ringing that corrupts data cells.
 
 use anyhow::{anyhow, Result};
 use image::{GrayImage, Luma, imageops::FilterType};
@@ -15,7 +14,8 @@ pub const GUARD_INNER: f32 = 0.22;
 pub const GUARD_OUTER: f32 = 0.85;
 pub const PILOT_RADIUS_NORM: f32 = 0.50;
 
-pub const LOGO_SIZE: u32 = 40;
+// Kept for API compat, unused.
+pub const LOGO_SIZE: u32 = 0;
 
 pub const PILOT_ANGLES: [f32; 4] = [
     std::f32::consts::PI / 6.0,
@@ -47,11 +47,8 @@ impl SplitMix64 {
     }
 }
 
-pub fn logo_bounds(size: usize) -> (usize, usize, usize, usize) {
-    let s = LOGO_SIZE as usize;
-    let c0 = (size - s) / 2;
-    let r0 = (size - s) / 2;
-    (c0, c0 + s, r0, r0 + s)
+pub fn logo_bounds(_size: usize) -> (usize, usize, usize, usize) {
+    (0, 0, 0, 0)
 }
 
 pub fn pilot_positions(size: usize) -> [(usize, usize); 4] {
@@ -73,12 +70,9 @@ pub fn data_cells(size: usize) -> Vec<(usize, usize)> {
     let half = size / 2;
     let pilots = pilot_positions(size);
     let pilot_exclude = 12i32;
-    let (lc0, lc1, lr0, lr1) = logo_bounds(size);
     let mut out = Vec::new();
     for y in 0..size {
         for x in 0..size {
-            // Skip center logo square
-            if x >= lc0 && x < lc1 && y >= lr0 && y < lr1 { continue; }
             let (mx, my) = ((size - x) % size, (size - y) % size);
             if x == mx && y == my { continue; }
             if (x > mx) || (x == mx && y > my) { continue; }
@@ -135,7 +129,9 @@ fn fft2d(matrix: &mut [Complex32], size: usize, inverse: bool) {
     }
 }
 
-/// Spectral background: photo in low-freq band only.
+/// Spectral background: photo spectrum in low-freq band only.
+/// Scaled to RMS=1.5 in spatial domain so data cells (at RMS ~0.4)
+/// are not overwhelmed by bleed.
 fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
     let resized = image::imageops::resize(photo, size as u32, size as u32, FilterType::Lanczos3);
     let n = (size * size) as f32;
@@ -162,38 +158,11 @@ fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
     let mut energy: f64 = 0.0;
     for v in &m { let a = v.norm() as f64; energy += a * a; }
     let n_f = size as f64;
-    let target_energy = (3.0 * n_f) * (3.0 * n_f);
+    // Lower target: RMS=1.5 (was 3.0). Keeps data cells dominant.
+    let target_energy = (1.5 * n_f) * (1.5 * n_f);
     let scale = ((target_energy / energy.max(1e-6)).sqrt()) as f32;
     for v in m.iter_mut() { *v = *v * scale; }
     m
-}
-
-/// Center logo overlay: hard-edged spatial paste (v3.2.0 style, worked).
-fn overlay_center_logo(img: &mut GrayImage, logo: &GrayImage) {
-    let (lc0, lc1, lr0, lr1) = logo_bounds(img.width() as usize);
-    let lw = lc1 - lc0;
-    let lh = lr1 - lr0;
-    let resized = image::imageops::resize(logo, lw as u32, lh as u32, FilterType::Lanczos3);
-    // White fill
-    for y in lr0..lr1 {
-        for x in lc0..lc1 {
-            img.put_pixel(x as u32, y as u32, Luma([255]));
-        }
-    }
-    // Copy with 1-pixel black border
-    for y in 0..lh {
-        for x in 0..lw {
-            let is_edge = x == 0 || y == 0 || x == lw - 1 || y == lh - 1;
-            let px = (lc0 + x) as u32;
-            let py = (lr0 + y) as u32;
-            if is_edge {
-                img.put_pixel(px, py, Luma([0]));
-            } else {
-                let sp = resized.get_pixel(x as u32, y as u32);
-                img.put_pixel(px, py, *sp);
-            }
-        }
-    }
 }
 
 pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
@@ -252,7 +221,7 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, px, py, PILOT_VALUES[i]);
     }
 
-    // 2. Spectral photo background
+    // 2. Spectral photo background (low-freq only, no spatial overlay)
     if let Some(p) = photo {
         let ps = build_photo_spectrum(size, p);
         for y in 0..size {
@@ -295,6 +264,8 @@ pub fn encode_stream(
 
     // 4. IFFT
     fft2d(&mut matrix, size, true);
+
+    // 5. Normalize
     let mut mn = f32::INFINITY;
     let mut mx = f32::NEG_INFINITY;
     for c in &matrix {
@@ -311,11 +282,5 @@ pub fn encode_stream(
             img.put_pixel(x as u32, y as u32, Luma([(norm * 255.0) as u8]));
         }
     }
-
-    // 5. Center logo spatial overlay (visible photo)
-    if let Some(p) = photo {
-        overlay_center_logo(&mut img, p);
-    }
-
     Ok(EncodedGlint { image: img, bytes_used: stream.len(), capacity_bytes })
 }
