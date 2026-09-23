@@ -105,6 +105,9 @@ pub struct FmAeroApp {
     progress_state: Option<Arc<ProgressState>>,
     last_speed_pps: Option<f32>,
     last_speed_bps: Option<f32>,
+    multisig_file: String,
+    multisig_status: String,
+    multisig_signatures: Vec<(String, String, String)>,
     settings: Settings,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
@@ -231,6 +234,9 @@ impl FmAeroApp {
             stego_preview_tex: None,
             stego_carrier_tex: None,
             stego_preview_dirty: false,
+            multisig_file: String::new(),
+            multisig_status: String::new(),
+            multisig_signatures: Vec::new(),
             settings,
             rx, tx,
         }
@@ -1977,6 +1983,71 @@ impl FmAeroApp {
                 ui.label("Ctrl+S - save pattern");
                 ui.label("Drag file into window - set as input");
                 ui.add_space(8.0);
+                                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("Multi-signature (FMEX)").strong());
+                ui.horizontal(|ui| {
+                    ui.label("File:");
+                    ui.add(egui::TextEdit::singleline(&mut self.multisig_file)
+                        .desired_width(ui.available_width() - 90.0)
+                        .hint_text("path to encoded .png"));
+                    if ui.small_button("Browse").clicked() {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("png", &["png"])
+                            .pick_file() {
+                            self.multisig_file = p.display().to_string();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Show signatures").clicked() {
+                        self.multisig_signatures.clear();
+                        match std::fs::read(&self.multisig_file) {
+                            Ok(bytes) => match crate::decoder::pipeline::split_header_payload_ms(&bytes) {
+                                Ok((_h, _p, ms)) => {
+                                    if let Some(block) = ms {
+                                        for s in block.signatures.iter() {
+                                            self.multisig_signatures.push((
+                                                s.purpose.clone(),
+                                                s.pubkey_hex.clone(),
+                                                s.sig_hex.clone(),
+                                            ));
+                                        }
+                                        self.multisig_status = format!("{} signatures, TSA: {}, Anchor: {}",
+                                            self.multisig_signatures.len(),
+                                            block.tsa_server.as_deref().unwrap_or("-"),
+                                            block.anchor_chain.as_deref().unwrap_or("-"));
+                                    } else {
+                                        self.multisig_status = "no FMEX block".into();
+                                    }
+                                }
+                                Err(e) => self.multisig_status = format!("parse: {}", e),
+                            },
+                            Err(e) => self.multisig_status = format!("read: {}", e),
+                        }
+                    }
+                    if ui.button("Verify all (fm_sign verify)").clicked() {
+                        self.multisig_status = format!("run: fm_sign verify {}", self.multisig_file);
+                    }
+                    if ui.button("Request TSA").clicked() {
+                        self.multisig_status = format!("run: fm_sign tsa {}", self.multisig_file);
+                    }
+                    if ui.button("OpenTimestamps").clicked() {
+                        self.multisig_status = format!("run: fm_sign ots {}", self.multisig_file);
+                    }
+                });
+                if !self.multisig_signatures.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Signatures:").weak());
+                    for (purpose, pubkey, sig) in self.multisig_signatures.iter().take(8) {
+                        let pk_short = if pubkey.len() >= 16 { &pubkey[..16] } else { pubkey.as_str() };
+                        let sig_short = if sig.len() >= 16 { &sig[..16] } else { sig.as_str() };
+                        ui.label(RichText::new(format!("  [{}] {} ... {}...", purpose, pk_short, sig_short)).weak().monospace());
+                    }
+                }
+                if !self.multisig_status.is_empty() {
+                    ui.label(RichText::new(&self.multisig_status).weak());
+                }
                 if ui.button("Open GitHub repo").clicked() {
                     let _ = webbrowser::open("https://github.com/user123141/FM-Aero-Code");
                 }
