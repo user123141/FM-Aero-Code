@@ -13,3 +13,6 @@ FM.ps1
 pages/
 web/pages/
 /web/pkg/
+fm_root.key
+fm_identity.json
+fm_trust.local.json
