@@ -1,6 +1,6 @@
 [package]
 name = "fm_aero_code_2"
-version = "3.6.1"
+version = "3.6.7"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]
@@ -40,6 +40,10 @@ path = "src/bin/fm_batch.rs"
 [[bin]]
 name = "fm_split"
 path = "src/bin/fm_split.rs"
+
+[[bin]]
+name = "fm_stego"
+path = "src/bin/fm_stego.rs"
 
 [[bin]]
 name = "fm_selftest"
@@ -93,9 +97,9 @@ gui = ["eframe", "rfd"]
 wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook"]
 
 [profile.release]
-opt-level = 3
-codegen-units = 4
-lto = "thin"
+opt-level = 2
+codegen-units = 16
+lto = false
 strip = "symbols"
 
 [profile.release-wasm]

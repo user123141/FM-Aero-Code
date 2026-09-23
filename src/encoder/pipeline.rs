@@ -16,6 +16,36 @@ use crate::MAX_COMPRESSED_BYTES;
 
 const FILENAME_MAX_LEN: usize = 200;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering as AtomicOrdering};
+
+/// Shared progress tracker for parallel page encoding.
+#[derive(Default, Debug)]
+pub struct ProgressState {
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+    pub bytes_done: AtomicU64,
+    pub bytes_total: AtomicU64,
+}
+
+impl ProgressState {
+    pub fn new() -> Self { Self::default() }
+    pub fn set_total(&self, n: usize, bytes: u64) {
+        self.total.store(n, AtomicOrdering::Relaxed);
+        self.bytes_total.store(bytes, AtomicOrdering::Relaxed);
+    }
+    pub fn inc(&self, chunk_bytes: u64) {
+        self.done.fetch_add(1, AtomicOrdering::Relaxed);
+        self.bytes_done.fetch_add(chunk_bytes, AtomicOrdering::Relaxed);
+    }
+    pub fn snapshot(&self) -> (usize, usize) {
+        (self.done.load(AtomicOrdering::Relaxed), self.total.load(AtomicOrdering::Relaxed))
+    }
+    pub fn bytes_snapshot(&self) -> (u64, u64) {
+        (self.bytes_done.load(AtomicOrdering::Relaxed), self.bytes_total.load(AtomicOrdering::Relaxed))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionMode { Auto, Lossless, LosslessPriority }
 impl Default for CompressionMode { fn default() -> Self { Self::LosslessPriority } }
@@ -47,6 +77,11 @@ pub struct EncodeOptions {
     pub border: bool,
     pub gamma: bool,
     pub mask: bool,
+    pub progress: Option<Arc<ProgressState>>,
+    pub stars: bool,
+    pub star_density: u16,
+    pub nebula: bool,
+    pub frame_pattern: u8,
 }
 
 impl Default for EncodeOptions {
@@ -68,6 +103,11 @@ impl Default for EncodeOptions {
             border: false,
             gamma: false,
             mask: false,
+            progress: None,
+            stars: false,
+            star_density: 60,
+            nebula: false,
+            frame_pattern: 0,
         }
     }
 }
@@ -266,7 +306,8 @@ fn encode_glint(
     logo: Option<&image::GrayImage>,
 ) -> Result<image::GrayImage> {
     let with_fec = crate::fec::encode(framed)?;
-    let glint = encode_stream(&with_fec, logo, opts.gamma, opts.mask)?;
+    let glint = encode_stream(&with_fec, logo, opts.gamma, opts.mask,
+        opts.star_density, opts.nebula, opts.frame_pattern)?;
     Ok(if opts.border {
         crate::encoder::aeroglint::wrap_with_border(&glint.image)
     } else {
@@ -327,6 +368,10 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
         (num_groups * group_size) as u16
     };
     if total_pages as usize > 65535 { return Err(anyhow!("too many pages: {}", total_pages)); }
+    if let Some(p) = &opts.progress {
+        let chunk_bytes = (AERO_HEADER_SIZE + chunk_data_size) as u64;
+        p.set_total(total_pages as usize, (total_pages as u64) * chunk_bytes);
+    }
 
     let flags = build_flags(opts, &p) | HEADER_FLAG_MULTIPAGE;
     let logo = opts.center_logo.as_deref().and_then(load_logo);
@@ -377,7 +422,11 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
                     let mut framed = Vec::with_capacity(AERO_HEADER_SIZE + chunk_data_size);
                     framed.extend_from_slice(&h.to_bytes());
                     framed.extend_from_slice(&chunks[i]);
-                    encode_glint(&framed, opts, logo.as_ref())
+                    let r = encode_glint(&framed, opts, logo.as_ref());
+                    if let Some(p) = &opts.progress {
+                        p.inc((AERO_HEADER_SIZE + chunks[i].len()) as u64);
+                    }
+                    r
                 })
                 .collect();
             frames.extend(results?);
@@ -399,6 +448,9 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
                 framed.extend_from_slice(&h.to_bytes());
                 framed.extend_from_slice(&chunks[i]);
                 frames.push(encode_glint(&framed, opts, logo.as_ref())?);
+                if let Some(p) = &opts.progress {
+                    p.inc((AERO_HEADER_SIZE + chunks[i].len()) as u64);
+                }
             }
         }
         for i in 0..par_pg {
@@ -416,6 +468,9 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
             framed.extend_from_slice(&h.to_bytes());
             framed.extend_from_slice(&parity[i]);
             frames.push(encode_glint(&framed, opts, logo.as_ref())?);
+            if let Some(p) = &opts.progress {
+                p.inc((AERO_HEADER_SIZE + parity[i].len()) as u64);
+            }
         }
     }
 

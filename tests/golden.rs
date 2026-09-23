@@ -24,6 +24,11 @@ fn build_opts(password: &str) -> EncodeOptions {
         border: false,
         gamma: false,
         mask: false,
+        progress: None,
+        stars: false,
+        star_density: 60,
+        nebula: false,
+        frame_pattern: 0,
     }
 }
 

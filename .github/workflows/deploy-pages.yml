@@ -1,4 +1,4 @@
-name: Deploy FM Aero Code 2 to GitHub Pages
+name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
@@ -18,12 +18,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.12.1 --locked
+      - name: Build WASM
+        run: wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
       - name: Prepare site
         run: |
           mkdir -p _site
           cp -r web/* _site/
           touch _site/.nojekyll
-          ls -la _site/
+          echo "=== site ==="; ls -la _site/
+          echo "=== pkg ==="; ls -la _site/pkg/ || true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

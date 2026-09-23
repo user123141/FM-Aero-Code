@@ -50,6 +50,11 @@ fn main() -> Result<()> {
         border,
         gamma,
         mask,
+        progress: None,
+        stars: false,
+        star_density: 60,
+        nebula: false,
+        frame_pattern: 0,
     };
     let f = encode_aeroflow(&payload, &opts)?;
     println!("Input: {} ({} B)", name, payload.len());

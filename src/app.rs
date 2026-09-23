@@ -1,5 +1,7 @@
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use crate::encoder::pipeline::ProgressState;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -19,7 +21,7 @@ const PREVIEW_MAX_FRAMES: usize = 128;
 const PREVIEW_FRAME_MS: u64 = 100;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab { Pattern, Decoded, Keys, About }
+enum Tab { Pattern, Decoded, Keys, Stego, About }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PrintKind { Png, Html, Svg, Pdf }
@@ -95,9 +97,21 @@ pub struct FmAeroApp {
     pan: Vec2,
     op_started: Option<Instant>,
     last_duration: Option<f32>,
+    progress_state: Option<Arc<ProgressState>>,
+    last_speed_pps: Option<f32>,
+    last_speed_bps: Option<f32>,
     settings: Settings,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
+    use_stars: bool,
+    star_density: u16,
+    use_nebula: bool,
+    frame_pattern: u8,
+    stego_carrier: Option<Vec<u8>>,
+    stego_carrier_name: String,
+    stego_payload: Option<Vec<u8>>,
+    stego_payload_name: String,
+    stego_output: Option<(Vec<u8>, String)>,
 }
 
 impl FmAeroApp {
@@ -155,6 +169,18 @@ impl FmAeroApp {
             pan: Vec2::ZERO,
             op_started: None,
             last_duration: None,
+            progress_state: None,
+            last_speed_pps: None,
+            last_speed_bps: None,
+            use_stars: false,
+            star_density: 60,
+            use_nebula: false,
+            frame_pattern: 0,
+            stego_carrier: None,
+            stego_carrier_name: String::new(),
+            stego_payload: None,
+            stego_payload_name: String::new(),
+            stego_output: None,
             settings,
             rx, tx,
         }
@@ -206,11 +232,17 @@ impl FmAeroApp {
         let border = self.border;
         let gamma = self.gamma;
         let mask = self.mask;
+        let use_stars = self.use_stars;
+        let star_density = self.star_density;
+        let use_nebula = self.use_nebula;
+        let frame_pattern = self.frame_pattern;
         if !self.input.is_empty() {
             self.settings.add_recent(&self.input);
         }
         self.save_settings();
         let tx = self.tx.clone();
+        let progress = Arc::new(ProgressState::new());
+        self.progress_state = Some(progress.clone());
         self.busy = true;
         self.op_started = Some(Instant::now());
         self.push(format!("Encoding {} ({})...", name, crate::types::human_bytes(data.len())));
@@ -233,6 +265,11 @@ impl FmAeroApp {
                 border,
                 gamma,
                 mask,
+                progress: Some(progress.clone()),
+                stars: use_stars,
+                star_density,
+                nebula: use_nebula,
+                frame_pattern,
             };
             match encode_payload(&data, &opts) {
                 Ok(r) => {
@@ -300,6 +337,8 @@ impl FmAeroApp {
         if path.is_empty() { self.push("no file selected"); return; }
         let pw = if self.use_encryption { self.password.clone() } else { String::new() };
         let tx = self.tx.clone();
+        let progress = Arc::new(ProgressState::new());
+        self.progress_state = Some(progress.clone());
         self.busy = true;
         self.op_started = Some(Instant::now());
         self.push("Decoding from file...");
@@ -319,6 +358,8 @@ impl FmAeroApp {
         };
         let pw = if self.use_encryption { self.password.clone() } else { String::new() };
         let tx = self.tx.clone();
+        let progress = Arc::new(ProgressState::new());
+        self.progress_state = Some(progress.clone());
         self.busy = true;
         self.op_started = Some(Instant::now());
         self.push("Decoding from RAM...");
@@ -488,6 +529,76 @@ impl FmAeroApp {
         }
     }
 
+    fn tick_progress(&mut self) {
+        let Some(ps) = self.progress_state.clone() else { return; };
+        let (done, total) = ps.snapshot();
+        if total == 0 { return; }
+        let (bytes_done, _) = ps.bytes_snapshot();
+        let elapsed = self.op_started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+        if done > 0 && elapsed > 0.2 {
+            self.last_speed_pps = Some(done as f32 / elapsed);
+            self.last_speed_bps = Some(bytes_done as f32 / elapsed);
+        }
+    }
+    fn stego_encode(&mut self) {
+        let Some(carrier_bytes) = self.stego_carrier.clone() else { return; };
+        let Some(payload) = self.stego_payload.clone() else { return; };
+        let password = if self.use_encryption && !self.password.is_empty() {
+            self.password.clone()
+        } else {
+            String::new()
+        };
+        let name = self.stego_payload_name.clone();
+        self.push(format!("Embedding {} B into carrier...", payload.len()));
+        match image::load_from_memory(&carrier_bytes) {
+            Ok(carrier) => {
+                let opts = crate::steganography::StegoOptions {
+                    password,
+                    original_name: name,
+                };
+                match crate::steganography::embed(&carrier, &payload, &opts) {
+                    Ok(out) => {
+                        let (w, h) = (out.image.width(), out.image.height());
+                        let mut png: Vec<u8> = Vec::new();
+                        {
+                            use image::ImageEncoder;
+                            use image::codecs::png::PngEncoder;
+                            let _ = PngEncoder::new(&mut png).write_image(
+                                out.image.as_raw(), w, h, image::ExtendedColorType::Rgb8);
+                        }
+                        self.push(format!(
+                            "Stego OK: {}x{} payload={} B stream={} B cap={} B",
+                            w, h, out.payload_bytes, out.fec_bytes, out.capacity_bytes));
+                        self.stego_output = Some((png, "stego.png".to_string()));
+                    }
+                    Err(e) => self.push(format!("stego error: {}", e)),
+                }
+            }
+            Err(e) => self.push(format!("carrier decode: {}", e)),
+        }
+    }
+
+    fn stego_decode(&mut self) {
+        let Some(stego_bytes) = self.stego_carrier.clone() else { return; };
+        let password = if self.use_encryption && !self.password.is_empty() {
+            self.password.clone()
+        } else {
+            String::new()
+        };
+        self.push("Extracting payload from stego image...");
+        match image::load_from_memory(&stego_bytes) {
+            Ok(img) => match crate::steganography::extract(&img, &password) {
+                Ok(payload) => {
+                    let name = format!("extracted_{}.bin", payload.len());
+                    self.push(format!("Extracted {} B", payload.len()));
+                    self.stego_output = Some((payload, name));
+                }
+                Err(e) => self.push(format!("extract error: {}", e)),
+            },
+            Err(e) => self.push(format!("image decode: {}", e)),
+        }
+    }
+
     fn ui_side(&mut self, ui: &mut egui::Ui) {
         ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(6.0);
@@ -603,6 +714,31 @@ impl FmAeroApp {
                     });
             });
             ui.checkbox(&mut self.border, "Detection border (camera / print)");
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("Soft decorations (visual only)").strong());
+            ui.checkbox(&mut self.use_stars, "Stars");
+            if self.use_stars {
+                ui.horizontal(|ui| {
+                    ui.label("density:");
+                    let mut d = self.star_density as f32;
+                    ui.add(egui::Slider::new(&mut d, 10.0..=500.0).show_value(false));
+                    self.star_density = d as u16;
+                    ui.label(format!("{}", self.star_density));
+                });
+            }
+            ui.checkbox(&mut self.use_nebula, "Nebula");
+            ui.horizontal(|ui| {
+                ui.label("frame:");
+                egui::ComboBox::from_id_salt("frame_pat")
+                    .selected_text(match self.frame_pattern { 1=>"Ring", 2=>"Cross", 3=>"Checker", _=>"None" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.frame_pattern, 0, "None");
+                        ui.selectable_value(&mut self.frame_pattern, 1, "Ring");
+                        ui.selectable_value(&mut self.frame_pattern, 2, "Cross");
+                        ui.selectable_value(&mut self.frame_pattern, 3, "Checker");
+                    });
+            });
 
             ui.add_space(8.0);
             ui.separator();
@@ -815,6 +951,92 @@ impl FmAeroApp {
                     self.cipher = CipherKind::SealV2;
                 }
             }
+            Tab::Stego => {
+                ui.heading("DCT Steganography");
+                ui.label(RichText::new("Embed data into a photo. Photo looks unchanged (DCT + QIM).").weak());
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.button("Load carrier photo").clicked() {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("image", &["png", "jpg", "jpeg", "bmp", "webp"])
+                            .pick_file() {
+                            if let Ok(b) = std::fs::read(&p) {
+                                self.stego_carrier_name = p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("cover.png").to_string();
+                                self.stego_carrier = Some(b);
+                            }
+                        }
+                    }
+                    if let Some(c) = self.stego_carrier.as_ref() {
+                        if let Ok(img) = image::load_from_memory(c) {
+                            let cap = crate::steganography::capacity_bytes(img.width(), img.height());
+                            ui.label(RichText::new(format!("{}x{} - capacity {:.1} KB",
+                                img.width(), img.height(), cap as f64 / 1024.0)).weak());
+                        }
+                    }
+                });
+                if !self.stego_carrier_name.is_empty() {
+                    ui.label(RichText::new(format!("carrier: {}", self.stego_carrier_name)).weak());
+                }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Load payload (secret)").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_file() {
+                            if let Ok(b) = std::fs::read(&p) {
+                                self.stego_payload_name = p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("secret.bin").to_string();
+                                self.stego_payload = Some(b);
+                            }
+                        }
+                    }
+                    if let Some(p) = self.stego_payload.as_ref() {
+                        ui.label(RichText::new(format!("{} ({} B)",
+                            self.stego_payload_name, p.len())).weak());
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.checkbox(&mut self.use_encryption, "Encrypt payload (uses password from Encryption panel)");
+
+                ui.add_space(8.0);
+                ui.separator();
+                let can_embed = self.stego_carrier.is_some() && self.stego_payload.is_some() && !self.busy;
+                ui.add_enabled_ui(can_embed, |ui| {
+                    if ui.add_sized([ui.available_width(), 38.0],
+                        egui::Button::new(RichText::new("Embed into photo").strong())).clicked() {
+                        self.stego_encode();
+                    }
+                });
+
+                let can_extract = self.stego_carrier.is_some() && !self.busy;
+                ui.add_enabled_ui(can_extract, |ui| {
+                    if ui.add_sized([ui.available_width(), 38.0],
+                        egui::Button::new("Extract payload from photo")).clicked() {
+                        self.stego_decode();
+                    }
+                });
+
+                if let Some((bytes, name)) = self.stego_output.as_ref() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(RichText::new(format!("output: {} ({:.1} KB)",
+                        name, bytes.len() as f64 / 1024.0)).weak());
+                    if ui.add_sized([ui.available_width(), 34.0],
+                        egui::Button::new("Save output")).clicked() {
+                        let n = name.clone();
+                        let b = bytes.clone();
+                        if let Some(p) = rfd::FileDialog::new().set_file_name(&n).save_file() {
+                            if std::fs::write(&p, &b).is_ok() {
+                                self.push(format!("saved {}", p.display()));
+                            }
+                        }
+                    }
+                }
+            }
             Tab::About => {
                 ui.heading("FM Aero Code 2");
                 ui.label(RichText::new(format!("Version {}", VERSION))
@@ -874,6 +1096,7 @@ impl eframe::App for FmAeroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_shortcuts(ctx);
         self.poll(ctx);
+        self.tick_progress();
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("FM Aero Code 2");
@@ -882,12 +1105,29 @@ impl eframe::App for FmAeroApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.busy {
                         let el = self.op_started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+                        let (done, total) = self.progress_state.as_ref().map(|p| p.snapshot()).unwrap_or((0, 0));
+                        let (bytes_done, _bt) = self.progress_state.as_ref().map(|p| p.bytes_snapshot()).unwrap_or((0, 0));
                         ui.add(egui::Spinner::new());
-                        ui.label(format!("Working... {:.1}s", el));
-                        ui.add(egui::ProgressBar::new(0.0).animate(true).desired_width(80.0));
+                        if total > 0 {
+                            let frac = (done as f32) / (total as f32);
+                            let eta = if done > 0 { el * (total as f32 - done as f32) / (done as f32) } else { 0.0 };
+                            let pps = if el > 0.2 { (done as f32) / el } else { 0.0 };
+                            let bps = if el > 0.2 { (bytes_done as f32) / el } else { 0.0 };
+                            ui.add(egui::ProgressBar::new(frac)
+                                .desired_width(220.0)
+                                .text(format!("{}/{} ({:.0}%)", done, total, frac * 100.0)));
+                            ui.label(format!("ETA {:.0}s", eta));
+                            ui.label(format!("{:.0} pps", pps));
+                            ui.label(format!("{}/s", crate::types::human_bytes(bps as usize)));
+                        } else {
+                            ui.label(format!("Working... {:.1}s", el));
+                            ui.add(egui::ProgressBar::new(0.0).animate(true).desired_width(140.0));
+                        }
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                     } else if let Some(d) = self.last_duration {
-                        ui.label(egui::RichText::new(format!("Last: {:.2}s", d)).weak());
+                        let pps = self.last_speed_pps.map(|s| format!(" | {:.0} pps", s)).unwrap_or_default();
+                        let bps = self.last_speed_bps.map(|s| format!(" | {}/s", crate::types::human_bytes(s as usize))).unwrap_or_default();
+                        ui.label(egui::RichText::new(format!("Last: {:.2}s{}{}", d, pps, bps)).weak());
                     }
                     ui.toggle_value(&mut self.show_log, "Log");
                 });
@@ -929,6 +1169,7 @@ impl eframe::App for FmAeroApp {
                 ui.selectable_value(&mut self.tab, Tab::Pattern, "Pattern");
                 ui.selectable_value(&mut self.tab, Tab::Decoded, "Decoded");
                 ui.selectable_value(&mut self.tab, Tab::Keys, "Keys");
+                ui.selectable_value(&mut self.tab, Tab::Stego, "Stego");
                 ui.selectable_value(&mut self.tab, Tab::About, "About");
             });
             ui.separator();

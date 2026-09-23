@@ -12,3 +12,4 @@ FM.ps1
 *.bak
 pages/
 web/pages/
+/web/pkg/

@@ -101,6 +101,38 @@ pub struct EncodedGlint {
 
 pub fn interleave_seed() -> u64 { 0x464D2D41_45524F32u64 }
 
+/// Soft decorative stars in the unused low-frequency region (r < GUARD_INNER).
+/// Data cells never live here, so this is purely visual and safe for decode.
+pub fn inject_stars(matrix: &mut [Complex32], size: usize, density: u16) {
+    if density == 0 { return; }
+    let half = size / 2;
+    let mut rng = SplitMix64::new(0xA37C_D3F0_01BE_EF99);
+    let n_stars = (density as usize).min(400);
+    for _ in 0..n_stars {
+        let a = (rng.next() as f32 / u64::MAX as f32) * std::f32::consts::TAU;
+        let rr = (rng.next() as f32 / u64::MAX as f32) * 0.18;
+        let r = rr * half as f32;
+        let xf = half as f32 + r * a.cos();
+        let yf = half as f32 + r * a.sin();
+        let xi = xf.round() as isize;
+        let yi = yf.round() as isize;
+        if xi < 0 || yi < 0 || xi >= size as isize || yi >= size as isize { continue; }
+        let xu = xi as usize;
+        let yu = yi as usize;
+        let amp = 0.04 + (rng.next() as f32 / u64::MAX as f32) * 0.06;
+        let ph = (rng.next() as f32 / u64::MAX as f32) * std::f32::consts::TAU;
+        let v = Complex32::new(amp * ph.cos(), amp * ph.sin());
+        let mx = (size - xu) % size;
+        let my = (size - yu) % size;
+        if xu == mx && yu == my {
+            matrix[yu * size + xu] = Complex32::new(v.re, 0.0);
+        } else {
+            matrix[yu * size + xu] = v;
+            matrix[my * size + mx] = v.conj();
+        }
+    }
+}
+
 fn set_hermitian(matrix: &mut [Complex32], size: usize, x: usize, y: usize, v: Complex32) {
     matrix[y * size + x] = v;
     let mx = (size - x) % size;
@@ -162,7 +194,10 @@ pub fn encode_stream(
     stream: &[u8],
     _photo: Option<&GrayImage>,
     _gamma: bool,
-    _mask: bool,
+    mask: bool,
+    star_density: u16,
+    nebula: bool,
+    frame_pattern: u8,
 ) -> Result<EncodedGlint> {
     let size = AEROGLINT_GRID;
     let cells = data_cells(size);
@@ -205,6 +240,10 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
     }
 
+    if nebula { inject_nebula(&mut matrix, size); }
+    if frame_pattern != 0 { inject_frame(&mut matrix, size, frame_pattern); }
+    if mask { inject_stars(&mut matrix, size, star_density); }
+
     fft2d(&mut matrix, size, true);
 
     let mut mn = f32::INFINITY;
@@ -224,4 +263,71 @@ pub fn encode_stream(
         }
     }
     Ok(EncodedGlint { image: img, bytes_used: stream.len(), capacity_bytes })
+}
+
+pub fn inject_nebula(matrix: &mut [Complex32], size: usize) {
+    let half = size / 2;
+    let mut rng = SplitMix64::new(0x5EED_11A0_5EED_11A0);
+    for _ in 0..6 {
+        let a = (rng.next() as f32 / u64::MAX as f32) * std::f32::consts::TAU;
+        let rr = (rng.next() as f32 / u64::MAX as f32) * 0.15;
+        let r = rr * half as f32;
+        let cx = half as f32 + r * a.cos();
+        let cy = half as f32 + r * a.sin();
+        let rad = 1.5 + (rng.next() as f32 / u64::MAX as f32) * 2.5;
+        let amp = 0.02 + (rng.next() as f32 / u64::MAX as f32) * 0.03;
+        let ri = rad.ceil() as isize;
+        for dy in -ri..=ri {
+            for dx in -ri..=ri {
+                let xi = cx.round() as isize + dx;
+                let yi = cy.round() as isize + dy;
+                if xi < 0 || yi < 0 || xi >= size as isize || yi >= size as isize { continue; }
+                let d2 = (dx*dx + dy*dy) as f32;
+                if d2 > rad * rad { continue; }
+                let falloff = 1.0 - (d2.sqrt() / rad);
+                let v = Complex32::new(amp * falloff, 0.0);
+                let xu = xi as usize;
+                let yu = yi as usize;
+                let mx = (size - xu) % size;
+                let my = (size - yu) % size;
+                if xu == mx && yu == my {
+                    matrix[yu * size + xu] += Complex32::new(v.re, 0.0);
+                } else {
+                    matrix[yu * size + xu] += v;
+                    matrix[my * size + mx] += v.conj();
+                }
+            }
+        }
+    }
+}
+
+pub fn inject_frame(matrix: &mut [Complex32], size: usize, pattern: u8) {
+    if pattern == 0 { return; }
+    let half = size / 2;
+    let amp = 0.03f32;
+    let r_inner = (half as f32) * 0.20;
+    let r_outer = (half as f32) * 0.24;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - half as f32;
+            let dy = y as f32 - half as f32;
+            let r = (dx*dx + dy*dy).sqrt();
+            let keep = match pattern {
+                1 => r >= r_inner && r <= r_outer,
+                2 => (r >= r_inner && r <= r_outer) && ((dx.abs() < 1.2) || (dy.abs() < 1.2)),
+                3 => (r >= r_inner && r <= r_outer) && (((x/4 + y/4) % 2) == 0),
+                _ => false,
+            };
+            if !keep { continue; }
+            let mx = (size - x) % size;
+            let my = (size - y) % size;
+            let v = Complex32::new(amp, 0.0);
+            if x == mx && y == my {
+                matrix[y * size + x] += v;
+            } else {
+                matrix[y * size + x] += v;
+                matrix[my * size + mx] += v.conj();
+            }
+        }
+    }
 }

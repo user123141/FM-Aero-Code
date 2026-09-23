@@ -32,6 +32,11 @@ fn base_opts(password: &str, filename: &str) -> EncodeOptions {
         border: false,
         gamma: false,
         mask: false,
+        progress: None,
+        stars: false,
+        star_density: 60,
+        nebula: false,
+        frame_pattern: 0,
     }
 }
 
@@ -219,4 +224,34 @@ fn base64_encode(data: &[u8]) -> String {
         out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
     }
     out
+}
+
+#[wasm_bindgen]
+pub fn stego_capacity_wasm(width: u32, height: u32) -> usize {
+    crate::steganography::capacity_bytes(width, height)
+}
+
+#[wasm_bindgen]
+pub fn stego_embed_wasm(carrier_png: &[u8], payload: &[u8], password: &str) -> Vec<u8> {
+    let Ok(carrier) = image::load_from_memory(carrier_png) else { return Vec::new(); };
+    let opts = crate::steganography::StegoOptions {
+        password: password.to_string(),
+        original_name: String::new(),
+    };
+    let Ok(out) = crate::steganography::embed(&carrier, payload, &opts) else { return Vec::new(); };
+    let mut png: Vec<u8> = Vec::new();
+    {
+        use image::ImageEncoder;
+        use image::codecs::png::PngEncoder;
+        if PngEncoder::new(&mut png)
+            .write_image(out.image.as_raw(), out.image.width(), out.image.height(),
+                image::ExtendedColorType::Rgb8).is_err() { return Vec::new(); }
+    }
+    png
+}
+
+#[wasm_bindgen]
+pub fn stego_extract_wasm(stego_png: &[u8], password: &str) -> Vec<u8> {
+    let Ok(img) = image::load_from_memory(stego_png) else { return Vec::new(); };
+    crate::steganography::extract(&img, password).unwrap_or_default()
 }

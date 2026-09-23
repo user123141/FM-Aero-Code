@@ -31,6 +31,15 @@ fn run_roundtrip(payload: &[u8], password: &str) -> anyhow::Result<Vec<u8>> {
         recipient_key: None,
         recipients: Vec::new(),
         gps: None,
+        resilience_level: 0,
+        border: false,
+        gamma: false,
+        mask: false,
+        progress: None,
+        stars: false,
+        star_density: 60,
+        nebula: false,
+        frame_pattern: 0,
     };
     let enc = encode_payload(payload, &opts)?;
     let (w, h) = (enc.image.width(), enc.image.height());
