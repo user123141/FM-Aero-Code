@@ -215,6 +215,7 @@ impl FmAeroApp {
         self.op_started = Some(Instant::now());
         self.push(format!("Encoding {} ({})...", name, crate::types::human_bytes(data.len())));
         std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
             let opts = EncodeOptions {
                 cipher,
                 password: pw,
@@ -246,9 +247,10 @@ impl FmAeroApp {
                         let _ = PngEncoder::new(&mut png).write_image(
                             r.image.as_raw(), w, h, image::ExtendedColorType::L8);
                     }
+                    let elapsed = t0.elapsed().as_secs_f32();
                     let _ = tx.send(Msg::Log(format!(
-                        "Encoded single-page: {}x{} | {} -> {}",
-                        w, h, crate::types::human_bytes(r.payload_bytes), crate::types::human_bytes(png.len()))));
+                        "Encoded {}x{} in {:.2}s | {} -> {}",
+                        w, h, elapsed, crate::types::human_bytes(r.payload_bytes), crate::types::human_bytes(png.len()))));
                     let _ = tx.send(Msg::Preview {
                         frames: vec![(px, w, h)],
                         bytes: png,

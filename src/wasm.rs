@@ -12,7 +12,7 @@ use image::GrayImage;
 pub fn wasm_init() { console_error_panic_hook::set_once(); }
 
 #[wasm_bindgen]
-pub fn wasm_version() -> String { "3.0.2".into() }
+pub fn wasm_version() -> String { crate::VERSION.into() }
 
 fn base_opts(password: &str, filename: &str) -> EncodeOptions {
     EncodeOptions {

@@ -1,21 +1,18 @@
-//! AeroGlint encoder (v3.6.0).
+//! AeroGlint encoder (v3.6.1).
 //!
-//! Photo lives in LOW frequencies only (r < GUARD_INNER). No spatial overlay
-//! because sharp edges create broadband FFT ringing that corrupts data cells.
+//! No photo overlay of any kind. Pure data + pilots + Hermitian symmetry.
+//! Keeps smallest possible visual footprint for maximum decode reliability.
 
 use anyhow::{anyhow, Result};
-use image::{GrayImage, Luma, imageops::FilterType};
+use image::{GrayImage, Luma};
 use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
 
 use crate::AEROGLINT_GRID;
 
-pub const GUARD_INNER: f32 = 0.22;
-pub const GUARD_OUTER: f32 = 0.85;
+pub const GUARD_INNER: f32 = 0.20;
+pub const GUARD_OUTER: f32 = 0.86;
 pub const PILOT_RADIUS_NORM: f32 = 0.50;
-
-// Kept for API compat, unused.
-pub const LOGO_SIZE: u32 = 0;
 
 pub const PILOT_ANGLES: [f32; 4] = [
     std::f32::consts::PI / 6.0,
@@ -45,10 +42,6 @@ impl SplitMix64 {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
         z ^ (z >> 31)
     }
-}
-
-pub fn logo_bounds(_size: usize) -> (usize, usize, usize, usize) {
-    (0, 0, 0, 0)
 }
 
 pub fn pilot_positions(size: usize) -> [(usize, usize); 4] {
@@ -129,42 +122,6 @@ fn fft2d(matrix: &mut [Complex32], size: usize, inverse: bool) {
     }
 }
 
-/// Spectral background: photo spectrum in low-freq band only.
-/// Scaled to RMS=1.5 in spatial domain so data cells (at RMS ~0.4)
-/// are not overwhelmed by bleed.
-fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
-    let resized = image::imageops::resize(photo, size as u32, size as u32, FilterType::Lanczos3);
-    let n = (size * size) as f32;
-    let mut sum = 0.0f32;
-    for p in resized.pixels() { sum += p.0[0] as f32; }
-    let mean = sum / n;
-    let mut m: Vec<Complex32> = resized.pixels()
-        .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
-        .collect();
-    fft2d(&mut m, size, false);
-
-    let c = size as f32 / 2.0;
-    let inner_r_sq = (GUARD_INNER * c) * (GUARD_INNER * c);
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - c;
-            let dy = y as f32 - c;
-            if dx * dx + dy * dy >= inner_r_sq {
-                m[y * size + x] = Complex32::new(0.0, 0.0);
-            }
-        }
-    }
-
-    let mut energy: f64 = 0.0;
-    for v in &m { let a = v.norm() as f64; energy += a * a; }
-    let n_f = size as f64;
-    // Lower target: RMS=1.5 (was 3.0). Keeps data cells dominant.
-    let target_energy = (1.5 * n_f) * (1.5 * n_f);
-    let scale = ((target_energy / energy.max(1e-6)).sqrt()) as f32;
-    for v in m.iter_mut() { *v = *v * scale; }
-    m
-}
-
 pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
     let w = inner.width();
     let h = inner.height();
@@ -200,9 +157,10 @@ pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
     out
 }
 
+/// Encode stream. `_photo` is accepted for API compatibility but ignored.
 pub fn encode_stream(
     stream: &[u8],
-    photo: Option<&GrayImage>,
+    _photo: Option<&GrayImage>,
     _gamma: bool,
     _mask: bool,
 ) -> Result<EncodedGlint> {
@@ -214,27 +172,12 @@ pub fn encode_stream(
     }
     let mut matrix = vec![Complex32::new(0.0, 0.0); size * size];
 
-    // 1. Pilots
     let pilots = pilot_positions(size);
     for i in 0..4 {
         let (px, py) = pilots[i];
         set_hermitian(&mut matrix, size, px, py, PILOT_VALUES[i]);
     }
 
-    // 2. Spectral photo background (low-freq only, no spatial overlay)
-    if let Some(p) = photo {
-        let ps = build_photo_spectrum(size, p);
-        for y in 0..size {
-            for x in 0..size {
-                let v = ps[y * size + x];
-                if v.norm() > 0.0 {
-                    set_hermitian(&mut matrix, size, x, y, v);
-                }
-            }
-        }
-    }
-
-    // 3. QPSK data
     let total_bits = stream.len() * 8;
     let mut bits: Vec<u8> = Vec::with_capacity(total_bits);
     for i in 0..total_bits {
@@ -262,10 +205,8 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
     }
 
-    // 4. IFFT
     fft2d(&mut matrix, size, true);
 
-    // 5. Normalize
     let mut mn = f32::INFINITY;
     let mut mx = f32::NEG_INFINITY;
     for c in &matrix {

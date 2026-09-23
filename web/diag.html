@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FM Aero Code 2 - Diagnostics</title>
+<style>
+body{margin:0;padding:20px;font:14px ui-monospace,monospace;background:#0a0e17;color:#c8ffc8}
+h1{color:#7cc8ff}
+.box{background:#000;border:1px solid #1a2436;border-radius:8px;padding:16px;margin:12px 0;white-space:pre-wrap}
+.ok{color:#78dc8c}.err{color:#ff7a7a}.warn{color:#ffc864}.dim{color:#98a8bd}
+button{background:#7cc8ff;border:0;color:#001;font:600 14px inherit;padding:10px 20px;border-radius:6px;cursor:pointer;margin:6px 0}
+</style>
+</head>
+<body>
+<h1>FM Aero Code 2 - Diagnostics</h1>
+<div id="out" class="box">Loading...</div>
+<button onclick="location.reload()">Reload page</button>
+<button onclick="clearAll()">Clear cache and reload</button>
+
+<script>
+const out = document.getElementById('out');
+function log(line, cls) {
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = line + '\n';
+  out.appendChild(span);
+}
+function clearAll() {
+  if (window.caches) {
+    caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k)))).then(() => {
+      if (navigator.serviceWorker) {
+        navigator.serviceWorker.getRegistrations().then(regs => {
+          Promise.all(regs.map(r => r.unregister())).then(() => location.reload(true));
+        });
+      } else {
+        location.reload(true);
+      }
+    });
+  } else {
+    location.reload(true);
+  }
+}
+out.innerHTML = '';
+log('=== Environment ===', 'dim');
+log('URL: ' + location.href);
+log('Protocol: ' + location.protocol);
+log('Secure context: ' + (window.isSecureContext ? 'YES' : 'NO'));
+if (location.protocol === 'file:') {
+  log('', '');
+  log('!!! ERROR: opened via file:// protocol', 'err');
+  log('Browsers block WASM loading from file:// (CORS policy).', 'err');
+  log('', '');
+  log('FIX: run a local HTTP server:', 'warn');
+  log('  cd web', 'warn');
+  log('  python -m http.server 8080', 'warn');
+  log('  then open http://localhost:8080', 'warn');
+  log('', '');
+  log('Or open the deployed GitHub Pages URL:', 'warn');
+  log('  https://user123141.github.io/FM-Aero-Code/', 'warn');
+}
+log('', '');
+log('=== Cache check ===', 'dim');
+if (window.caches) {
+  caches.keys().then(keys => {
+    log('Cache keys: ' + (keys.length === 0 ? '(none)' : keys.join(', ')), keys.length === 0 ? 'ok' : 'warn');
+    if (navigator.serviceWorker) {
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        log('Service workers: ' + (regs.length === 0 ? '(none)' : regs.length + ' active'), regs.length === 0 ? 'ok' : 'warn');
+        loadWasm();
+      });
+    } else {
+      loadWasm();
+    }
+  });
+} else {
+  log('Cache API not available (old browser?)', 'warn');
+  loadWasm();
+}
+
+function loadWasm() {
+  log('', '');
+  log('=== Loading WASM ===', 'dim');
+  const cacheBust = '?v=' + Date.now();
+  import('./pkg/fm_aero_code_2.js' + cacheBust).then(mod => {
+    log('Module imported', 'ok');
+    return mod.default().then(() => mod);
+  }).then(mod => {
+    if (mod.wasm_init) mod.wasm_init();
+    let v = 'unknown';
+    if (mod.wasm_version) {
+      try { v = mod.wasm_version(); } catch (e) { v = 'ERR ' + e.message; }
+    }
+    log('WASM version: ' + v, 'ok');
+    log('Exports: ' + Object.keys(mod).length, 'ok');
+    log('', '');
+    log('=== All checks passed ===', 'ok');
+    log('Web UI should work. Open index.html', 'ok');
+  }).catch(e => {
+    log('', '');
+    log('!!! WASM LOAD FAILED !!!', 'err');
+    log('Error: ' + e.message, 'err');
+    log('', '');
+    log('Possible causes:', 'warn');
+    log('  1. web/pkg/ directory missing', 'warn');
+    log('  2. WASM file not built (run wasm-pack build)', 'warn');
+    log('  3. Wrong Content-Type for .wasm (need application/wasm)', 'warn');
+    log('  4. Browser cache from old version', 'warn');
+  });
+}
+</script>
+</body>
+</html>
