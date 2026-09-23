@@ -106,6 +106,8 @@ pub struct FmAeroApp {
     last_speed_pps: Option<f32>,
     last_speed_bps: Option<f32>,
     multisig_file: String,
+    multisig_seed_input: String,
+    multisig_purpose_input: String,
     multisig_status: String,
     multisig_signatures: Vec<(String, String, String)>,
     settings: Settings,
@@ -235,6 +237,8 @@ impl FmAeroApp {
             stego_carrier_tex: None,
             stego_preview_dirty: false,
             multisig_file: String::new(),
+            multisig_seed_input: String::new(),
+            multisig_purpose_input: "author".to_string(),
             multisig_status: String::new(),
             multisig_signatures: Vec::new(),
             settings,
@@ -2000,6 +2004,58 @@ impl FmAeroApp {
                     }
                 });
                 ui.horizontal(|ui| {
+                    ui.label("Seed:");
+                    ui.add(egui::TextEdit::singleline(&mut self.multisig_seed_input)
+                        .password(true)
+                        .desired_width(ui.available_width() - 160.0)
+                        .hint_text("64 hex chars (ed25519 seed)"));
+                    ui.label("Purpose:");
+                    ui.add(egui::TextEdit::singleline(&mut self.multisig_purpose_input)
+                        .desired_width(70.0)
+                        .hint_text("author"));
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Sign (in-memory)").clicked() {
+                        if self.multisig_file.is_empty() {
+                            self.multisig_status = "no file".into();
+                        } else if self.multisig_seed_input.len() != 64 {
+                            self.multisig_status = "seed must be 64 hex chars".into();
+                        } else if let Ok(seed_bytes) = hex::decode(&self.multisig_seed_input) {
+                            if seed_bytes.len() != 32 {
+                                self.multisig_status = "seed must decode to 32 bytes".into();
+                            } else {
+                                let mut seed = [0u8; 32];
+                                seed.copy_from_slice(&seed_bytes);
+                                match std::fs::read(&self.multisig_file) {
+                                    Ok(bytes) => match crate::decoder::pipeline::split_header_payload_ms(&bytes) {
+                                        Ok((h, payload, ms)) => {
+                                            let mut clean = Vec::with_capacity(128 + payload.len());
+                                            clean.extend_from_slice(&h.to_bytes());
+                                            clean.extend_from_slice(&payload);
+                                            let purpose = if self.multisig_purpose_input.is_empty() { "author".to_string() } else { self.multisig_purpose_input.clone() };
+                                            let sig = crate::multisig::make_author_signature(&clean, &seed, &purpose);
+                                            let mut block = ms.unwrap_or_default();
+                                            block.signatures.retain(|s| !(s.pubkey_hex == sig.pubkey_hex && s.purpose == sig.purpose));
+                                            block.signatures.push(sig);
+                                            let fmex = block.encode_block();
+                                            let mut out = Vec::with_capacity(128 + fmex.len() + payload.len());
+                                            out.extend_from_slice(&h.to_bytes());
+                                            out.extend_from_slice(&fmex);
+                                            out.extend_from_slice(&payload);
+                                            match std::fs::write(&self.multisig_file, out) {
+                                                Ok(_) => self.multisig_status = format!("signed. total signatures: {}", block.signatures.len()),
+                                                Err(e) => self.multisig_status = format!("write: {}", e),
+                                            }
+                                        }
+                                        Err(e) => self.multisig_status = format!("parse: {}", e),
+                                    },
+                                    Err(e) => self.multisig_status = format!("read: {}", e),
+                                }
+                            }
+                        } else {
+                            self.multisig_status = "bad hex seed".into();
+                        }
+                    }
                     if ui.button("Show signatures").clicked() {
                         self.multisig_signatures.clear();
                         match std::fs::read(&self.multisig_file) {
@@ -2007,11 +2063,7 @@ impl FmAeroApp {
                                 Ok((_h, _p, ms)) => {
                                     if let Some(block) = ms {
                                         for s in block.signatures.iter() {
-                                            self.multisig_signatures.push((
-                                                s.purpose.clone(),
-                                                s.pubkey_hex.clone(),
-                                                s.sig_hex.clone(),
-                                            ));
+                                            self.multisig_signatures.push((s.purpose.clone(), s.pubkey_hex.clone(), s.sig_hex.clone()));
                                         }
                                         self.multisig_status = format!("{} signatures, TSA: {}, Anchor: {}",
                                             self.multisig_signatures.len(),
@@ -2026,13 +2078,61 @@ impl FmAeroApp {
                             Err(e) => self.multisig_status = format!("read: {}", e),
                         }
                     }
-                    if ui.button("Verify all (fm_sign verify)").clicked() {
-                        self.multisig_status = format!("run: fm_sign verify {}", self.multisig_file);
+                    if ui.button("Verify (in-memory)").clicked() {
+                        match std::fs::read(&self.multisig_file) {
+                            Ok(bytes) => match crate::decoder::pipeline::split_header_payload_ms(&bytes) {
+                                Ok((h, payload, ms)) => {
+                                    let mut clean = Vec::with_capacity(128 + payload.len());
+                                    clean.extend_from_slice(&h.to_bytes());
+                                    clean.extend_from_slice(&payload);
+                                    if let Some(block) = ms {
+                                        let total = block.signatures.len();
+                                        let mut ok = 0;
+                                        for s in block.signatures.iter() {
+                                            if crate::multisig::verify_signature(&clean, s) { ok += 1; }
+                                        }
+                                        self.multisig_status = format!("{} / {} signatures VALID", ok, total);
+                                    } else {
+                                        self.multisig_status = "no signatures".into();
+                                    }
+                                }
+                                Err(e) => self.multisig_status = format!("parse: {}", e),
+                            },
+                            Err(e) => self.multisig_status = format!("read: {}", e),
+                        }
                     }
-                    if ui.button("Request TSA").clicked() {
-                        self.multisig_status = format!("run: fm_sign tsa {}", self.multisig_file);
+                    if ui.button("Request TSA (in-memory)").clicked() {
+                        match std::fs::read(&self.multisig_file) {
+                            Ok(bytes) => match crate::decoder::pipeline::split_header_payload_ms(&bytes) {
+                                Ok((h, payload, ms)) => {
+                                    let mut clean = Vec::with_capacity(128 + payload.len());
+                                    clean.extend_from_slice(&h.to_bytes());
+                                    clean.extend_from_slice(&payload);
+                                    let hash = crate::tsa::sha256(&clean);
+                                    match crate::tsa::request(&hash, "http://freetsa.org/tsr") {
+                                        Ok(token) => {
+                                            let mut block = ms.unwrap_or_default();
+                                            block.tsa_server = Some("http://freetsa.org/tsr".into());
+                                            block.tsa_token_b64 = Some(hex::encode(&token));
+                                            let fmex = block.encode_block();
+                                            let mut out = Vec::with_capacity(128 + fmex.len() + payload.len());
+                                            out.extend_from_slice(&h.to_bytes());
+                                            out.extend_from_slice(&fmex);
+                                            out.extend_from_slice(&payload);
+                                            match std::fs::write(&self.multisig_file, out) {
+                                                Ok(_) => self.multisig_status = format!("TSA token received: {} bytes, embedded", token.len()),
+                                                Err(e) => self.multisig_status = format!("write: {}", e),
+                                            }
+                                        }
+                                        Err(e) => self.multisig_status = format!("TSA failed: {}", e),
+                                    }
+                                }
+                                Err(e) => self.multisig_status = format!("parse: {}", e),
+                            },
+                            Err(e) => self.multisig_status = format!("read: {}", e),
+                        }
                     }
-                    if ui.button("OpenTimestamps").clicked() {
+                    if ui.button("OpenTimestamps (CLI)").clicked() {
                         self.multisig_status = format!("run: fm_sign ots {}", self.multisig_file);
                     }
                 });
