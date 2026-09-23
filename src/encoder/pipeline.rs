@@ -359,21 +359,48 @@ pub fn encode_aeroflow(payload: &[u8], opts: &EncodeOptions) -> Result<FlowOutco
         } else {
             Vec::new()
         };
-        for i in 0..chunks.len() {
-            let page_idx = (g * group_size + i) as u16;
-            let mut h = AeroHeader::with_page(
-                p.data_type, CompressionKind::AeroPack, p.cipher, flags,
-                p.effective_size as u32, p.stream.len() as u32,
-                page_idx, total_pages, p.content_hash,
-            );
-            h.resilience_level = opts.resilience_level;
-            h = finalize_header(h, opts)?;
-            h.page_crc = fnv32(&chunks[i]);
-            h.checksum = h.compute_checksum();
-            let mut framed = Vec::with_capacity(AERO_HEADER_SIZE + chunk_data_size);
-            framed.extend_from_slice(&h.to_bytes());
-            framed.extend_from_slice(&chunks[i]);
-            frames.push(encode_glint(&framed, opts, logo.as_ref())?);
+        // Parallel page encoding (native): rayon speedup ~4x on 8+ cores
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            let results: Result<Vec<image::GrayImage>> = (0..chunks.len()).into_par_iter()
+                .map(|i| -> Result<image::GrayImage> {
+                    let page_idx = (g * group_size + i) as u16;
+                    let mut h = AeroHeader::with_page(
+                        p.data_type, CompressionKind::AeroPack, p.cipher, flags,
+                        p.effective_size as u32, p.stream.len() as u32,
+                        page_idx, total_pages, p.content_hash,
+                    );
+                    h.resilience_level = opts.resilience_level;
+                    h = finalize_header(h, opts)?;
+                    h.page_crc = fnv32(&chunks[i]);
+                    h.checksum = h.compute_checksum();
+                    let mut framed = Vec::with_capacity(AERO_HEADER_SIZE + chunk_data_size);
+                    framed.extend_from_slice(&h.to_bytes());
+                    framed.extend_from_slice(&chunks[i]);
+                    encode_glint(&framed, opts, logo.as_ref())
+                })
+                .collect();
+            frames.extend(results?);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for i in 0..chunks.len() {
+                let page_idx = (g * group_size + i) as u16;
+                let mut h = AeroHeader::with_page(
+                    p.data_type, CompressionKind::AeroPack, p.cipher, flags,
+                    p.effective_size as u32, p.stream.len() as u32,
+                    page_idx, total_pages, p.content_hash,
+                );
+                h.resilience_level = opts.resilience_level;
+                h = finalize_header(h, opts)?;
+                h.page_crc = fnv32(&chunks[i]);
+                h.checksum = h.compute_checksum();
+                let mut framed = Vec::with_capacity(AERO_HEADER_SIZE + chunk_data_size);
+                framed.extend_from_slice(&h.to_bytes());
+                framed.extend_from_slice(&chunks[i]);
+                frames.push(encode_glint(&framed, opts, logo.as_ref())?);
+            }
         }
         for i in 0..par_pg {
             let page_idx = (g * group_size + data_pg + i) as u16;

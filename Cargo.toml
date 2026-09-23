@@ -1,6 +1,6 @@
 [package]
 name = "fm_aero_code_2"
-version = "3.4.1"
+version = "3.5.0"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]
@@ -109,3 +109,6 @@ codegen-units = 1
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
+[[bench]]
+name = "encode_bench"
+harness = false

@@ -1,7 +1,8 @@
-//! AeroGlint encoder (v3.2.0).
+//! AeroGlint encoder (v3.5.0).
 //!
-//! Center logo: reserve central square for user photo (spatial, guaranteed
-//! visible). Data cells skip that square. Optional spectral background.
+//! Photo lives in LOW frequencies (r < GUARD_INNER).
+//! Data lives in MID frequencies (GUARD_INNER..GUARD_OUTER).
+//! No spatial overlay - avoids FFT ringing that corrupts data cells.
 
 use anyhow::{anyhow, Result};
 use image::{GrayImage, Luma, imageops::FilterType};
@@ -14,8 +15,8 @@ pub const GUARD_INNER: f32 = 0.22;
 pub const GUARD_OUTER: f32 = 0.85;
 pub const PILOT_RADIUS_NORM: f32 = 0.50;
 
-/// Central logo square side, in cells. 40 cells = 31% width.
-pub const LOGO_SIZE: u32 = 24;
+/// Kept for API compatibility - not used in v3.5.0
+pub const LOGO_SIZE: u32 = 0;
 
 pub const PILOT_ANGLES: [f32; 4] = [
     std::f32::consts::PI / 6.0,
@@ -47,13 +48,6 @@ impl SplitMix64 {
     }
 }
 
-pub fn logo_bounds(size: usize) -> (usize, usize, usize, usize) {
-    let s = LOGO_SIZE as usize;
-    let c0 = (size - s) / 2;
-    let r0 = (size - s) / 2;
-    (c0, c0 + s, r0, r0 + s)
-}
-
 pub fn pilot_positions(size: usize) -> [(usize, usize); 4] {
     let c = size as f32 / 2.0;
     let r = PILOT_RADIUS_NORM * c;
@@ -69,16 +63,14 @@ pub fn pilot_positions(size: usize) -> [(usize, usize); 4] {
     out
 }
 
+/// Data cells: canonical half-plane, mid-freq band, excluding pilots.
 pub fn data_cells(size: usize) -> Vec<(usize, usize)> {
     let half = size / 2;
     let pilots = pilot_positions(size);
     let pilot_exclude = 12i32;
-    let (lc0, lc1, lr0, lr1) = logo_bounds(size);
     let mut out = Vec::new();
     for y in 0..size {
         for x in 0..size {
-            // Skip center logo square
-            if x >= lc0 && x < lc1 && y >= lr0 && y < lr1 { continue; }
             let (mx, my) = ((size - x) % size, (size - y) % size);
             if x == mx && y == my { continue; }
             if (x > mx) || (x == mx && y > my) { continue; }
@@ -99,23 +91,6 @@ pub fn data_cells(size: usize) -> Vec<(usize, usize)> {
             let r = (fx * fx + fy * fy).sqrt() / half as f32;
             if r < GUARD_INNER || r > GUARD_OUTER { continue; }
             out.push((x, y));
-        }
-    }
-    out
-}
-
-fn spectral_cells(size: usize) -> Vec<(usize, usize)> {
-    let c = size as f32 / 2.0;
-    let inner_r_sq = (GUARD_INNER * c) * (GUARD_INNER * c);
-    let mut out = Vec::new();
-    for y in 0..size {
-        for x in 0..size {
-            let (mx, my) = ((size - x) % size, (size - y) % size);
-            if x == mx && y == my { continue; }
-            if (x > mx) || (x == mx && y > my) { continue; }
-            let dx = x as f32 - c;
-            let dy = y as f32 - c;
-            if dx * dx + dy * dy < inner_r_sq { out.push((x, y)); }
         }
     }
     out
@@ -152,7 +127,8 @@ fn fft2d(matrix: &mut [Complex32], size: usize, inverse: bool) {
     }
 }
 
-fn build_spectral_photo(size: usize, photo: &GrayImage) -> Vec<Complex32> {
+/// Build photo spectrum in the low-frequency band, normalized by energy.
+fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
     let resized = image::imageops::resize(photo, size as u32, size as u32, FilterType::Lanczos3);
     let n = (size * size) as f32;
     let mut sum = 0.0f32;
@@ -162,6 +138,8 @@ fn build_spectral_photo(size: usize, photo: &GrayImage) -> Vec<Complex32> {
         .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
         .collect();
     fft2d(&mut m, size, false);
+
+    // Zero cells outside low-freq band
     let c = size as f32 / 2.0;
     let inner_r_sq = (GUARD_INNER * c) * (GUARD_INNER * c);
     for y in 0..size {
@@ -173,83 +151,16 @@ fn build_spectral_photo(size: usize, photo: &GrayImage) -> Vec<Complex32> {
             }
         }
     }
+
+    // Energy normalization (Parseval: spatial RMS = sqrt(sum|X|^2) / N)
     let mut energy: f64 = 0.0;
     for v in &m { let a = v.norm() as f64; energy += a * a; }
     let n_f = size as f64;
-    let target_energy = (3.0 * n_f) * (3.0 * n_f);
+    // Target spatial RMS = 4.0 (photo dominates visually)
+    let target_energy = (4.0 * n_f) * (4.0 * n_f);
     let scale = ((target_energy / energy.max(1e-6)).sqrt()) as f32;
     for v in m.iter_mut() { *v = *v * scale; }
     m
-}
-
-fn gaussian_blur(img: &GrayImage, radius: f32) -> GrayImage {
-    let sigma = radius.max(0.5);
-    let k = (2.0 * sigma).ceil() as i32;
-    let mut kernel = Vec::with_capacity((2 * k + 1) as usize);
-    let mut sum = 0.0f32;
-    for i in -k..=k {
-        let v = (-(i as f32).powi(2) / (2.0 * sigma * sigma)).exp();
-        kernel.push(v);
-        sum += v;
-    }
-    for v in kernel.iter_mut() { *v /= sum; }
-    let (w, h) = (img.width() as i32, img.height() as i32);
-    let mut tmp = GrayImage::new(img.width(), img.height());
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0f32;
-            for i in -k..=k {
-                let sx = (x + i).clamp(0, w - 1) as u32;
-                acc += img.get_pixel(sx, y as u32).0[0] as f32 * kernel[(i + k) as usize];
-            }
-            tmp.put_pixel(x as u32, y as u32, Luma([acc.clamp(0.0, 255.0) as u8]));
-        }
-    }
-    let mut out = GrayImage::new(img.width(), img.height());
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0f32;
-            for i in -k..=k {
-                let sy = (y + i).clamp(0, h - 1) as u32;
-                acc += tmp.get_pixel(x as u32, sy).0[0] as f32 * kernel[(i + k) as usize];
-            }
-            out.put_pixel(x as u32, y as u32, Luma([acc.clamp(0.0, 255.0) as u8]));
-        }
-    }
-    out
-}
-/// Spatial overlay of logo into center square.
-/// Logo edges are feathered (gaussian blur) so the sharp boundary does not
-/// create FFT ringing that corrupts the QPSK data cells.
-fn overlay_center_logo(img: &mut GrayImage, logo: &GrayImage) {
-    let (lc0, lc1, lr0, lr1) = logo_bounds(img.width() as usize);
-    let lw = lc1 - lc0;
-    let lh = lr1 - lr0;
-    // Pad with white padding ring around the resized logo
-    let padded = {
-        let mut p = GrayImage::new((lw + 4) as u32, (lh + 4) as u32);
-        for px in p.pixels_mut() { px.0[0] = 255; }
-        let inner = image::imageops::resize(logo, lw as u32, lh as u32, FilterType::Lanczos3);
-        for y in 0..lh {
-            for x in 0..lw {
-                let sp = inner.get_pixel(x as u32, y as u32);
-                p.put_pixel((x + 2) as u32, (y + 2) as u32, *sp);
-            }
-        }
-        p
-    };
-    // Feather edges: blur radius ~2 cells, then crop back
-    let feathered = gaussian_blur(&padded, 1.5);
-    // Blend into img with soft boundary
-    for y in 0..lh {
-        for x in 0..lw {
-            let px = (lc0 + x) as u32;
-            let py = (lr0 + y) as u32;
-            // Sample from padded+blurred with offset
-            let sp = feathered.get_pixel((x + 2) as u32, (y + 2) as u32);
-            img.put_pixel(px, py, *sp);
-        }
-    }
 }
 
 pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
@@ -289,7 +200,7 @@ pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
 
 pub fn encode_stream(
     stream: &[u8],
-    logo: Option<&GrayImage>,
+    photo: Option<&GrayImage>,
     _gamma: bool,
     _mask: bool,
 ) -> Result<EncodedGlint> {
@@ -299,19 +210,18 @@ pub fn encode_stream(
     if stream.len() > capacity_bytes {
         return Err(anyhow!("stream {} > glint capacity {}", stream.len(), capacity_bytes));
     }
-
     let mut matrix = vec![Complex32::new(0.0, 0.0); size * size];
 
-    // Pilots
+    // 1. Pilots
     let pilots = pilot_positions(size);
     for i in 0..4 {
         let (px, py) = pilots[i];
         set_hermitian(&mut matrix, size, px, py, PILOT_VALUES[i]);
     }
 
-    // Spectral photo background (soft, in low-freq)
-    if let Some(l) = logo {
-        let ps = build_spectral_photo(size, l);
+    // 2. Photo spectrum in low-freq band (no spatial overlay)
+    if let Some(p) = photo {
+        let ps = build_photo_spectrum(size, p);
         for y in 0..size {
             for x in 0..size {
                 let v = ps[y * size + x];
@@ -322,7 +232,7 @@ pub fn encode_stream(
         }
     }
 
-    // QPSK data
+    // 3. QPSK data in mid-freq band
     let total_bits = stream.len() * 8;
     let mut bits: Vec<u8> = Vec::with_capacity(total_bits);
     for i in 0..total_bits {
@@ -350,7 +260,7 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
     }
 
-    // IFFT + normalize
+    // 4. IFFT + normalize
     fft2d(&mut matrix, size, true);
     let mut mn = f32::INFINITY;
     let mut mx = f32::NEG_INFINITY;
@@ -368,11 +278,5 @@ pub fn encode_stream(
             img.put_pixel(x as u32, y as u32, Luma([(norm * 255.0) as u8]));
         }
     }
-
-    // Overlay center logo (spatial, guaranteed visible)
-    if let Some(l) = logo {
-        overlay_center_logo(&mut img, l);
-    }
-
     Ok(EncodedGlint { image: img, bytes_used: stream.len(), capacity_bytes })
 }
