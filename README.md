@@ -1,85 +1,130 @@
 # FM Aero Code 2
 
-Fast Memory optical storage. Encode any file into a printable black-and-white pattern that survives camera capture.
+[![CI](https://github.com/user123141/FM-Aero-Code/actions/workflows/ci.yml/badge.svg)](https://github.com/user123141/FM-Aero-Code/actions/workflows/ci.yml)
+[![Deploy](https://github.com/user123141/FM-Aero-Code/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/user123141/FM-Aero-Code/actions/workflows/deploy-pages.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 
-Version 3.5.2 | MIT License | Author: Maksym Skorina
+**Optical data storage in printable patterns + invisible photo watermarking.**
 
-## What it does
+Encode any file into a printable spectral pattern that survives camera capture.
+Or hide data inside a normal photo using DCT steganography - the photo looks unchanged.
 
-FM Aero Code converts arbitrary bytes into a spectral pattern. Pipeline:
+Try it in your browser: **[user123141.github.io/FM-Aero-Code](https://user123141.github.io/FM-Aero-Code/)**
+
+## Two independent channels
+
+| Mode | What it does | Use case |
+|---|---|---|
+| **AeroGlint** (spectral) | Encodes bytes into 2D-OFDM over an FFT grid. Printable. Camera-readable. | QR-code alternative, printable backups, AR markers |
+| **Stego** (DCT) | Embeds bytes into high-frequency DCT coefficients of a normal photo. Photo looks unchanged. | Watermarking, covert data in images, album/photo metadata |
+
+Both can be combined: put an AeroGlint pattern on a page, then stego-hide metadata in the same image.
+
+## AeroGlint pipeline
 
     file bytes
-      -> AeroPack v20 (BWT + MTF + RLE + DPCM3 + BCJ x86)
+      -> AeroPack v20 (BWT + MTF + RLE + DPCM + BCJ x86, adaptive per block)
       -> AeroSeal v1/v2 (XChaCha20-Poly1305 + Argon2id, optional)
       -> Reed-Solomon RS(255, 223) FEC
       -> Optional page-level RS resilience (5 levels, 0-50%)
       -> PRNG bit interleaving (SplitMix64)
       -> QPSK onto 128x128 FFT grid (Hermitian symmetric)
-      -> Optional photo in low-frequency cells (spectral camouflage)
+      -> Photo in low-frequency cells (visual camouflage)
       -> 2D IFFT -> grayscale image
       -> PNG (single) or APNG (multi-page)
 
 Decoder reverses: strip border -> FFT -> pilot-ring rotation -> QPSK demod
 (multipass threshold) -> de-interleave -> RS decode -> decrypt -> unpack.
 
+## Stego pipeline
+
+    carrier photo (any RGB)
+      + payload bytes
+      -> optional AeroSeal v1 (XChaCha20-Poly1305)
+      -> Reed-Solomon RS(255, 223) FEC
+      -> header: FMS1 magic + FEC-len + flags + content-hash
+      -> 8x8 block DCT on R channel
+      -> QIM embed (Delta=14) into 54 high-freq coefficients per block
+      -> 8-pass iterative refinement with integer rounding
+      -> IDCT -> integer R -> stego photo (visually unchanged)
+
+Extract: DCT each block -> read QIM parity -> header -> FEC -> decrypt -> verify hash.
+
 ## Features
 
+**AeroGlint**
 - Any file type: text, music, photos, video, executables, archives
 - Bit-perfect round-trip: 9/9 self-tests + property-based tests
 - Configurable resilience: 0% / 5% / 10% / 25% / 50% page-loss recovery
-- Spectral camouflage: photo overlay in low-frequency spectrum
+- Spectral camouflage: photo overlay in low-frequency spectrum (16x16 downsample)
+- Soft decorations: stars (density slider), nebula clouds, ring/cross/checker frame
 - Cross-platform: native GUI (Windows / Linux / macOS) + WASM (browser)
-- Offline PWA: no network required
 - Print-ready: fm_split + print.html for A4 sheets
+
+**Stego**
+- Carrier photo looks visually unchanged
+- Bit-perfect extraction after PNG save/reload
+- Optional password encryption (AeroSeal v1)
+- Capacity: ~27 KB @ 512x512, ~108 KB @ 1024x1024
+- CLI + GUI + WASM
 
 ## Quick start
 
-Build native:
-
-    cargo build --release
+    cargo build --release --lib -j 1
+    cargo build --release --bin fm_gui -j 1
     ./target/release/fm_gui
+
+Run self-tests:
+
     ./target/release/fm_selftest
-
-Build WASM (browser):
-
-    wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
-    cd web && python -m http.server 8080
 
 ## CLI
 
-Encode single file:
+**AeroGlint encode/decode:**
 
     fm_encode photo.jpg photo.aero.png --password mypass
     fm_encode file.bin file.aero.png --border
+    fm_decode photo.aero.png restored.jpg --password mypass
 
-Encode multi-page with resilience:
+**Multi-page with resilience:**
 
     fm_split book.pdf ./pages --resilience 3   # 25% recovery
     fm_split file.bin ./pages --resilience 4   # 50% recovery
 
-Decode:
+**Steganography:**
 
-    fm_decode photo.aero.png restored.jpg --password mypass
-    fm_decode pattern.png out.jpg --secret <64_hex_chars>
+    fm_stego capacity cover.png
+    fm_stego embed cover.png secret.bin stego.png --password hunter2
+    fm_stego extract stego.png recovered.bin --password hunter2
 
-Batch process folders:
+**Batch:**
 
     fm_batch encode ./in ./out --password mypass --recursive --jobs 8
     fm_batch decode ./patterns ./restored --recursive
 
-Generate keypair:
+**Keypair:**
 
     fm_keygen write
 
 ## Resilience levels
 
-| Level    | Data/Parity | Recovery | Overhead |
-|----------|-------------|----------|----------|
-| Off      | 200 / 0     | 0%       | +0%      |
-| Low      | 190 / 10    | 5%       | +5%      |
-| Balanced | 180 / 20    | 10%      | +11%     |
-| High     | 150 / 50    | 25%      | +33%     |
-| Extreme  | 100 / 100   | 50%      | +100%    |
+| Level | Data/Parity | Recovery | Overhead |
+|-------|-------------|----------|----------|
+| Off | 200 / 0 | 0% | +0% |
+| Low | 190 / 10 | 5% | +5% |
+| Balanced | 180 / 20 | 10% | +11% |
+| High | 150 / 50 | 25% | +33% |
+| Extreme | 100 / 100 | 50% | +100% |
+
+## Stego capacity
+
+| Carrier | Payload capacity |
+|---|---|
+| 256x256 | ~6 KB |
+| 512x512 | ~27 KB |
+| 1024x1024 | ~108 KB |
+| 2048x2048 | ~430 KB |
 
 ## Security
 
@@ -88,52 +133,68 @@ Generate keypair:
 - HMAC-SHA256 for header + payload integrity
 - Ed25519 signatures (optional)
 - zeroize scrubbing of key material
-- forbid(unsafe_code)
+- `#![forbid(unsafe_code)]`
 
-See SECURITY.md for threat model.
+See [SECURITY.md](SECURITY.md) for threat model.
 
 ## Project structure
 
     src/
-      lib.rs           crate root
-      error.rs         error types
-      types.rs         AeroHeader, DataType, ResilienceLevel
-      fec.rs           Reed-Solomon wrapper
-      resilience.rs    parameterized page-level RS
-      selftest.rs      round-trip verification
-      fastmem.rs       size caps, atomic writes
-      crypto/          AeroSeal v1/v2, Argon2id, Ed25519
-      encoder/         AeroPack, AeroGlint FFT encoder, APNG
-      decoder/         FFT decoder, QPSK, pilot detection
-      app.rs           egui GUI
-      icon.rs          application icon
-      wasm.rs          WASM bindings
-      bin/             CLI tools
+      lib.rs              crate root
+      error.rs            error types
+      types.rs            AeroHeader, DataType, ResilienceLevel
+      fec.rs              Reed-Solomon wrapper
+      resilience.rs       page-level RS for AeroFlow
+      selftest.rs         round-trip verification
+      fastmem.rs          size caps, atomic writes
+      settings.rs         persistent GUI settings
+      crypto/             AeroSeal v1/v2, Argon2id, Ed25519, X25519
+      encoder/            AeroPack, AeroGlint FFT, APNG, print
+      decoder/            FFT decoder, QPSK, pilot detection
+      steganography/      DCT + QIM watermarking
+      app.rs              egui GUI (4 tabs: Pattern/Decoded/Keys/Stego)
+      icon.rs             application icon
+      wasm.rs             WASM bindings
+      bin/                CLI tools
 
-    web/
-      index.html       PWA scanner + encoder
-      print.html       print pages to A4
-      sw.js            service worker (offline cache)
-      manifest.json    PWA manifest
-
-    tests/
-      property_tests.rs    proptest (10,000 cases)
-
-    benches/
-      aeropack_bench.rs    criterion benchmarks
+    web/                  PWA + print
+    tests/                golden + property tests
+    benches/              criterion benchmarks
 
 ## Technology
 
-| Layer       | Implementation |
-|-------------|----------------|
-| Compression | AeroPack v20 (adaptive BWT+MTF+RLE+DPCM3, BCJ x86) |
-| Transport   | 2D OFDM over FFT with QPSK, Hermitian symmetric |
-| Pilots      | 4 tones at 30/60/120/150 deg, radius 0.50 Nyquist |
-| Interleave  | SplitMix64 PRNG (fixed seed) |
-| FEC         | RS(255, 223) + page-level RS resilience |
-| Crypto      | XChaCha20-Poly1305, Argon2id, HMAC-SHA256, Ed25519, X25519 |
-| Camouflage  | Photo in low-freq spectrum (r < 0.28) |
+| Layer | Implementation |
+|---|---|
+| Compression | AeroPack v20 (adaptive BWT+MTF+RLE+DPCM, BCJ x86) |
+| Transport | 2D OFDM over FFT, QPSK, Hermitian symmetric |
+| Pilots | 4 tones at 30/60/120/150 deg, radius 0.50 Nyquist |
+| Interleave | SplitMix64 PRNG (fixed seed) |
+| FEC | RS(255, 223) + page-level RS resilience |
+| Crypto | XChaCha20-Poly1305, Argon2id, HMAC-SHA256, Ed25519, X25519 |
+| Camouflage | Photo in low-freq spectrum (r < 0.18) |
+| Stego | 8x8 DCT + QIM (Delta=14) on R channel |
+
+## Roadmap
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed plan.
+
+**Next up (v3.7.x / v3.8.x):**
+- Robust stego mode (survives JPEG q=60, spread-spectrum)
+- Stego strength slider in GUI
+- Web stego UI (drag photo + payload in browser)
+- Finder patterns for camera scan (QR-like corner markers)
+- Adaptive binarization (Sauvola) for uneven lighting
+- Soft-decision RS decoding (LPR erasures)
+
+**Later (v4.x):**
+- Progressive decoding (metadata in low-freq, payload in high-freq)
+- 16-QAM / 64-QAM adaptive constellations
+- Dot-gain pre-emphasis for printer compensation
+- Inter-frame APNG compression (video mode)
+- WebGL/WebGPU FFT
+- WebWorkers + WASM threads
+- Zero-copy WASM pipeline
 
 ## License
 
-MIT. See LICENSE.
+MIT. See [LICENSE](LICENSE).

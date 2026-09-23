@@ -677,12 +677,14 @@ impl FmAeroApp {
             password: password.clone(),
             original_name: name,
         };
-        let Ok(out) = crate::steganography::embed(&carrier, &payload, &opts) else {
-            self.push("test: embed failed"); return;
+        let out = match crate::steganography::embed(&carrier, &payload, &opts) {
+            Ok(o) => o,
+            Err(e) => { self.push(format!("test: embed failed: {}", e)); return; }
         };
         let dyn_img = image::DynamicImage::ImageRgb8(out.image.clone());
-        let Ok(extracted) = crate::steganography::extract(&dyn_img, &password) else {
-            self.push("test: extract failed"); return;
+        let extracted = match crate::steganography::extract(&dyn_img, &password) {
+            Ok(e) => e,
+            Err(e) => { self.push(format!("test: extract failed: {}", e)); return; }
         };
         let elapsed = t0.elapsed().as_secs_f32();
         if extracted == payload {
