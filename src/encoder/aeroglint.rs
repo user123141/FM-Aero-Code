@@ -1,10 +1,7 @@
-//! AeroGlint encoder (v3.1.0).
+//! AeroGlint encoder (v3.2.0).
 //!
-//! Spectral camouflage: photo occupies LOW frequencies (r < GUARD_INNER),
-//! data occupies MID. Domains are disjoint so both survive.
-//!
-//! Photo scaling normalizes TOTAL ENERGY, not peak, so the photo is
-//! visible regardless of input dynamic range.
+//! Center logo: reserve central square for user photo (spatial, guaranteed
+//! visible). Data cells skip that square. Optional spectral background.
 
 use anyhow::{anyhow, Result};
 use image::{GrayImage, Luma, imageops::FilterType};
@@ -13,9 +10,12 @@ use rustfft::FftPlanner;
 
 use crate::AEROGLINT_GRID;
 
-pub const GUARD_INNER: f32 = 0.28;
-pub const GUARD_OUTER: f32 = 0.78;
+pub const GUARD_INNER: f32 = 0.22;
+pub const GUARD_OUTER: f32 = 0.85;
 pub const PILOT_RADIUS_NORM: f32 = 0.50;
+
+/// Central logo square side, in cells. 40 cells = 31% width.
+pub const LOGO_SIZE: u32 = 40;
 
 pub const PILOT_ANGLES: [f32; 4] = [
     std::f32::consts::PI / 6.0,
@@ -47,6 +47,13 @@ impl SplitMix64 {
     }
 }
 
+pub fn logo_bounds(size: usize) -> (usize, usize, usize, usize) {
+    let s = LOGO_SIZE as usize;
+    let c0 = (size - s) / 2;
+    let r0 = (size - s) / 2;
+    (c0, c0 + s, r0, r0 + s)
+}
+
 pub fn pilot_positions(size: usize) -> [(usize, usize); 4] {
     let c = size as f32 / 2.0;
     let r = PILOT_RADIUS_NORM * c;
@@ -66,9 +73,12 @@ pub fn data_cells(size: usize) -> Vec<(usize, usize)> {
     let half = size / 2;
     let pilots = pilot_positions(size);
     let pilot_exclude = 12i32;
+    let (lc0, lc1, lr0, lr1) = logo_bounds(size);
     let mut out = Vec::new();
     for y in 0..size {
         for x in 0..size {
+            // Skip center logo square
+            if x >= lc0 && x < lc1 && y >= lr0 && y < lr1 { continue; }
             let (mx, my) = ((size - x) % size, (size - y) % size);
             if x == mx && y == my { continue; }
             if (x > mx) || (x == mx && y > my) { continue; }
@@ -94,8 +104,7 @@ pub fn data_cells(size: usize) -> Vec<(usize, usize)> {
     out
 }
 
-/// Canonical (half-plane) cells inside low-frequency circle.
-fn photo_cells(size: usize) -> Vec<(usize, usize)> {
+fn spectral_cells(size: usize) -> Vec<(usize, usize)> {
     let c = size as f32 / 2.0;
     let inner_r_sq = (GUARD_INNER * c) * (GUARD_INNER * c);
     let mut out = Vec::new();
@@ -143,9 +152,7 @@ fn fft2d(matrix: &mut [Complex32], size: usize, inverse: bool) {
     }
 }
 
-/// Build photo spectrum, then scale by total energy so photo RMS in the
-/// spatial domain matches the target (photo dominates visually).
-fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
+fn build_spectral_photo(size: usize, photo: &GrayImage) -> Vec<Complex32> {
     let resized = image::imageops::resize(photo, size as u32, size as u32, FilterType::Lanczos3);
     let n = (size * size) as f32;
     let mut sum = 0.0f32;
@@ -155,8 +162,6 @@ fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
         .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
         .collect();
     fft2d(&mut m, size, false);
-
-    // Zero everything outside low-freq band
     let c = size as f32 / 2.0;
     let inner_r_sq = (GUARD_INNER * c) * (GUARD_INNER * c);
     for y in 0..size {
@@ -168,19 +173,41 @@ fn build_photo_spectrum(size: usize, photo: &GrayImage) -> Vec<Complex32> {
             }
         }
     }
-
-    // Compute total energy, scale to target.
     let mut energy: f64 = 0.0;
     for v in &m { let a = v.norm() as f64; energy += a * a; }
-
-    // Target spatial RMS for photo = 2.0. Parseval: sum|x|^2 = (1/N)*sum|X|^2.
-    // RMS = sqrt(sum|X|^2) / N. Want RMS=2.0 => sum|X|^2 = (2.0*N)^2.
     let n_f = size as f64;
-    let target_energy = (2.0 * n_f) * (2.0 * n_f);
+    let target_energy = (3.0 * n_f) * (3.0 * n_f);
     let scale = ((target_energy / energy.max(1e-6)).sqrt()) as f32;
-
     for v in m.iter_mut() { *v = *v * scale; }
     m
+}
+
+/// Spatial overlay of logo into center square with thin black border.
+fn overlay_center_logo(img: &mut GrayImage, logo: &GrayImage) {
+    let (lc0, lc1, lr0, lr1) = logo_bounds(img.width() as usize);
+    let lw = lc1 - lc0;
+    let lh = lr1 - lr0;
+    let resized = image::imageops::resize(logo, lw as u32, lh as u32, FilterType::Lanczos3);
+    // White fill (so logos with transparent bg are visible)
+    for y in lr0..lr1 {
+        for x in lc0..lc1 {
+            img.put_pixel(x as u32, y as u32, Luma([255]));
+        }
+    }
+    // Copy resized logo with 1-pixel black frame
+    for y in 0..lh {
+        for x in 0..lw {
+            let is_edge = x == 0 || y == 0 || x == lw - 1 || y == lh - 1;
+            let px = (lc0 + x) as u32;
+            let py = (lr0 + y) as u32;
+            if is_edge {
+                img.put_pixel(px, py, Luma([0]));
+            } else {
+                let sp = resized.get_pixel(x as u32, y as u32);
+                img.put_pixel(px, py, *sp);
+            }
+        }
+    }
 }
 
 pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
@@ -220,7 +247,7 @@ pub fn wrap_with_border(inner: &GrayImage) -> GrayImage {
 
 pub fn encode_stream(
     stream: &[u8],
-    photo: Option<&GrayImage>,
+    logo: Option<&GrayImage>,
     _gamma: bool,
     _mask: bool,
 ) -> Result<EncodedGlint> {
@@ -233,16 +260,16 @@ pub fn encode_stream(
 
     let mut matrix = vec![Complex32::new(0.0, 0.0); size * size];
 
-    // 1. Pilots
+    // Pilots
     let pilots = pilot_positions(size);
     for i in 0..4 {
         let (px, py) = pilots[i];
         set_hermitian(&mut matrix, size, px, py, PILOT_VALUES[i]);
     }
 
-    // 2. Photo (low-freq band)
-    if let Some(p) = photo {
-        let ps = build_photo_spectrum(size, p);
+    // Spectral photo background (soft, in low-freq)
+    if let Some(l) = logo {
+        let ps = build_spectral_photo(size, l);
         for y in 0..size {
             for x in 0..size {
                 let v = ps[y * size + x];
@@ -253,7 +280,7 @@ pub fn encode_stream(
         }
     }
 
-    // 3. Data (mid-freq band)
+    // QPSK data
     let total_bits = stream.len() * 8;
     let mut bits: Vec<u8> = Vec::with_capacity(total_bits);
     for i in 0..total_bits {
@@ -281,7 +308,7 @@ pub fn encode_stream(
         set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
     }
 
-    // 4. IFFT + normalize
+    // IFFT + normalize
     fft2d(&mut matrix, size, true);
     let mut mn = f32::INFINITY;
     let mut mx = f32::NEG_INFINITY;
@@ -299,5 +326,11 @@ pub fn encode_stream(
             img.put_pixel(x as u32, y as u32, Luma([(norm * 255.0) as u8]));
         }
     }
+
+    // Overlay center logo (spatial, guaranteed visible)
+    if let Some(l) = logo {
+        overlay_center_logo(&mut img, l);
+    }
+
     Ok(EncodedGlint { image: img, bytes_used: stream.len(), capacity_bytes })
 }

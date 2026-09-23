@@ -156,7 +156,9 @@ impl AeroHeader {
             signature: [0u8; 64], hmac: [0u8; 16], reserved: [0u8; 4],
             page_crc: 0, resilience_level: 0, mask: 0,
         };
-        let ts = now_unix();
+        // Fixed timestamp for deterministic encoding: 1751328000 = 2025-07-01 00:00 UTC.
+        // Same input bytes always produce same output pattern.
+        let ts: u32 = 1751328000;
         h.reserved.copy_from_slice(&ts.to_le_bytes());
         h.checksum = h.compute_checksum();
         h
