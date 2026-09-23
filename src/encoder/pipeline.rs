@@ -113,6 +113,7 @@ impl Default for EncodeOptions {
 }
 
 #[derive(Clone)]
+#[derive(Debug)]
 pub struct EncodeOutcome {
     pub image: image::GrayImage,
     pub payload_bytes: usize,

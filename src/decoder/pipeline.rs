@@ -16,6 +16,7 @@ use crate::types::{
 use crate::MAX_DECOMPRESSED_BYTES;
 use ed25519_dalek::VerifyingKey;
 
+#[derive(Debug)]
 pub struct DecodeOutcome {
     pub payload: Vec<u8>,
     pub header: AeroHeader,

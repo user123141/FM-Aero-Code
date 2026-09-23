@@ -37,14 +37,14 @@ const SIG_LEN: usize = 64;
 const SIG_TOTAL: usize = SIG_PUB_LEN + SIG_LEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StegoMode { BitPerfect, Robust }
+pub enum StegoMode { BitPerfect, Robust, DualB }
 impl Default for StegoMode { fn default() -> Self { Self::BitPerfect } }
 impl StegoMode {
     pub fn label(&self) -> &'static str {
-        match self { Self::BitPerfect => "BitPerfect (PNG)", Self::Robust => "Robust (JPEG)" }
+        match self { Self::BitPerfect => "BitPerfect (PNG)", Self::Robust => "Robust (JPEG)", Self::DualB => "DualB (layered)" }
     }
     pub fn short(&self) -> &'static str {
-        match self { Self::BitPerfect => "BitPerfect", Self::Robust => "Robust" }
+        match self { Self::BitPerfect => "BitPerfect", Self::Robust => "Robust", Self::DualB => "DualB" }
     }
 }
 
@@ -121,6 +121,12 @@ pub fn capacity_bytes_for(w: u32, h: u32, mode: StegoMode) -> usize {
             let payload_stream_bytes = payload_slots / 8;
             let fec_max = payload_stream_bytes.saturating_sub(STREAM_OVERHEAD_MAX);
             (fec_max * 223) / 255
+        }
+        StegoMode::DualB => {
+            let bits = (w as usize) * (h as usize);
+            let raw = bits / 8;
+            let after = raw.saturating_sub(STREAM_OVERHEAD_MAX);
+            (after * 223) / 255
         }
     }
 }
@@ -532,7 +538,36 @@ fn extract_robust_with_delta(rgb: &RgbImage, delta: f32) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// ---------- DualB: B-channel-only LSB (coexists with AeroGlint grayscale) ----------
+fn embed_dual_b(mut rgb: RgbImage, stream: &[u8]) -> Result<RgbImage> {
+    let bits = bytes_to_bits(stream);
+    let (w, h) = (rgb.width(), rgb.height());
+    let mut i = 0usize;
+    'outer: for y in 0..h {
+        for x in 0..w {
+            if i >= bits.len() { break 'outer; }
+            let px = rgb.get_pixel_mut(x, y);
+            px.0[2] = (px.0[2] & 0xFE) | bits[i];
+            i += 1;
+        }
+    }
+    if i < bits.len() { return Err(anyhow!("DualB overflow")); }
+    Ok(rgb)
+}
+
+fn extract_dual_b(rgb: &RgbImage) -> Vec<u8> {
+    let (w, h) = (rgb.width(), rgb.height());
+    let mut bits = Vec::with_capacity((w as usize) * (h as usize));
+    for y in 0..h {
+        for x in 0..w {
+            bits.push(rgb.get_pixel(x, y).0[2] & 1);
+        }
+    }
+    bits_to_bytes(&bits)
+}
+
 // ---------- Public API ----------
+
 pub fn embed(carrier: &DynamicImage, payload: &[u8], opts: &StegoOptions) -> Result<StegoOutcome> {
     let rgb = carrier.to_rgb8();
     let (w, h) = (rgb.width(), rgb.height());
@@ -548,6 +583,7 @@ pub fn embed(carrier: &DynamicImage, payload: &[u8], opts: &StegoOptions) -> Res
 
     let out_image = match opts.mode {
         StegoMode::BitPerfect => embed_bit_perfect(rgb, &stream)?,
+        StegoMode::DualB => embed_dual_b(rgb, &stream)?,
         StegoMode::Robust => {
             let mut chosen: Option<RgbImage> = None;
             let mut last = String::from("no delta");
@@ -587,6 +623,9 @@ pub fn extract(stego: &DynamicImage, password: &str) -> Result<StegoExtract> {
 
     let lsb_raw = extract_bit_perfect(&rgb);
     if let Ok(r) = try_decode_stream(&lsb_raw, password) { return Ok(r); }
+
+    let dualb_raw = extract_dual_b(&rgb);
+    if let Ok(r) = try_decode_stream(&dualb_raw, password) { return Ok(r); }
 
     let mut last = String::from("no delta");
     for &d in ROBUST_DELTA_SET.iter() {

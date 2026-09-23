@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "fm_aero_code_2"
-version = "3.9.6"
+version = "3.9.9"
 dependencies = [
  "anyhow",
  "argon2",

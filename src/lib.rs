@@ -17,6 +17,7 @@ pub mod crypto;
 pub mod encoder;
 pub mod decoder;
 pub mod steganography;
+pub mod layered;
 
 #[cfg(feature = "gui")]
 pub mod app;
@@ -27,7 +28,7 @@ pub mod wasm;
 
 pub const FORMAT_VERSION: u8 = 2;
 pub const AUTHOR: &str = "Maksym Skorina";
-pub const VERSION: &str = "3.9.6";
+pub const VERSION: &str = "3.9.9";
 pub const PRODUCT_NAME: &str = "FM Aero Code 2";
 
 /// Hard cap on decompressed payload size (512 MiB).

@@ -277,7 +277,7 @@ impl FmAeroApp {
         let resilience_level = self.resilience_level;
         let border = self.border;
         let gamma = self.gamma;
-        let mask = self.mask;
+        let mask = self.mask || self.use_stars;
         let use_stars = self.use_stars;
         let star_density = self.star_density;
         let use_nebula = self.use_nebula;
@@ -812,6 +812,7 @@ impl FmAeroApp {
             ui.label(RichText::new(match self.stego_mode {
                 StegoMode::BitPerfect => "PNG-only, 100% bit-perfect, max capacity.",
                 StegoMode::Robust => "Survives JPEG q>=85, less capacity, tiny artifacts.",
+                StegoMode::DualB => "B-channel LSB only - coexists with AeroGlint in one image.",
             }).weak());
             ui.add_space(6.0);
             ui.separator();
@@ -1601,6 +1602,7 @@ impl FmAeroApp {
             ui.label(RichText::new(match self.stego_mode {
                 StegoMode::BitPerfect => "PNG-only, 100% bit-perfect, max capacity.",
                 StegoMode::Robust => "Survives JPEG q>=85, less capacity, tiny artifacts.",
+                StegoMode::DualB => "B-channel LSB only - coexists with AeroGlint in one image.",
             }).weak());
             ui.add_space(6.0);
             ui.separator();
