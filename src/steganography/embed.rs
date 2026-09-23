@@ -1,9 +1,4 @@
-//! DCT steganography: embed and extract arbitrary bytes from a carrier image.
-//!
-//! v3.7.1: embed directly in the R channel (no YCbCr roundtrip).
-//! Rationale: RGB->YCbCr->RGB->YCbCr introduces +-1 drift in Y, which
-//! flips QIM bits near bin boundaries. R-channel is lossless through
-//! PNG save/reload, so we sidestep the entire class of bugs.
+//! DCT steganography v3.7.2 - fixed round-trip with final IDCT.
 
 use anyhow::{anyhow, Result};
 use image::{DynamicImage, RgbImage};
@@ -13,10 +8,9 @@ use crate::fec;
 use crate::steganography::dct::{dct8x8, idct8x8, BLOCK_AREA, EMBED_IDX};
 use crate::steganography::STEGO_MAGIC;
 
-/// QIM quantization step. Larger = more robust but more visible.
-pub const QIM_DELTA: f32 = 14.0;
-
+pub const QIM_DELTA: f32 = 16.0;
 const MIN_SIDE: u32 = 64;
+const REFINE_PASSES: usize = 6;
 
 #[derive(Debug, Clone)]
 pub struct StegoOptions {
@@ -46,24 +40,24 @@ pub fn capacity_bytes(w: u32, h: u32) -> usize {
     let blocks = (bx as usize) * (by as usize);
     let bits = blocks * EMBED_IDX.len();
     let raw = bits / 8;
-    let after_header = raw.saturating_sub(16);
-    let payload = (after_header * 223) / 255;
-    payload
+    let after_header = raw.saturating_sub(17);
+    (after_header * 223) / 255
 }
 
-fn qim_embed(c: f32, bit: u8) -> f32 {
+fn qim_place(c: f32, bit: u8) -> f32 {
     let q = (c / QIM_DELTA).round() as i32;
     let target = bit as i32;
     let parity = ((q % 2) + 2) % 2;
     if parity == target {
-        return q as f32 * QIM_DELTA;
+        q as f32 * QIM_DELTA
+    } else {
+        let down = q - 1;
+        let up = q + 1;
+        let d_down = (c - down as f32 * QIM_DELTA).abs();
+        let d_up = (c - up as f32 * QIM_DELTA).abs();
+        let q2 = if d_down < d_up { down } else { up };
+        q2 as f32 * QIM_DELTA
     }
-    let down = q - 1;
-    let up = q + 1;
-    let d_down = (c - (down as f32 * QIM_DELTA)).abs();
-    let d_up = (c - (up as f32 * QIM_DELTA)).abs();
-    let q2 = if d_down < d_up { down } else { up };
-    q2 as f32 * QIM_DELTA
 }
 
 fn qim_extract(c: f32) -> u8 {
@@ -81,10 +75,7 @@ fn build_stream(payload: &[u8], opts: &StegoOptions) -> Result<(Vec<u8>, CipherK
         (sealed, CipherKind::SealV1)
     };
     let fec_data = fec::encode(&enc_bytes)?;
-    let flags: u8 = match cipher {
-        CipherKind::None => 0,
-        _ => 1,
-    };
+    let flags: u8 = match cipher { CipherKind::None => 0, _ => 1 };
     let hash = content_hash_8(payload);
     let mut out = Vec::with_capacity(17 + fec_data.len());
     out.extend_from_slice(&STEGO_MAGIC);
@@ -124,78 +115,71 @@ pub fn embed(carrier: &DynamicImage, payload: &[u8], opts: &StegoOptions) -> Res
 
     'outer: for byi in 0..by {
         for bxi in 0..bx {
-            let x0 = bxi * 8;
-            let y0 = byi * 8;
+            if bit_i >= bits.len() { break 'outer; }
+            let x0 = (bxi * 8) as u32;
+            let y0 = (byi * 8) as u32;
 
             let mut block = [0.0f32; BLOCK_AREA];
             for yy in 0..8 {
                 for xx in 0..8 {
-                    let px = rgb.get_pixel((x0 + xx) as u32, (y0 + yy) as u32);
+                    let px = rgb.get_pixel(x0 + xx as u32, y0 + yy as u32);
                     block[yy * 8 + xx] = px.0[0] as f32;
                 }
             }
+
             let mut dct = [0.0f32; BLOCK_AREA];
             dct8x8(&block, &mut dct);
 
             let bit_start = bit_i;
             for &idx in EMBED_IDX.iter() {
                 if bit_i >= bits.len() { break; }
-                dct[idx] = qim_embed(dct[idx], bits[bit_i]);
+                dct[idx] = qim_place(dct[idx], bits[bit_i]);
                 bit_i += 1;
             }
             let bit_end = bit_i;
 
-            // Iterative refinement with integer rounding (matches actual save)
-            let mut spatial_int = [0u8; BLOCK_AREA];
-            for _pass in 0..8 {
-                let mut spatial = [0.0f32; BLOCK_AREA];
-                idct8x8(&dct, &mut spatial);
+            // Refinement: converge dct so that IDCT-round-DCT preserves bit parities
+            for _pass in 0..REFINE_PASSES {
+                let mut sp = [0.0f32; BLOCK_AREA];
+                idct8x8(&dct, &mut sp);
+                let mut sp_i = [0u8; BLOCK_AREA];
                 for i in 0..BLOCK_AREA {
-                    spatial_int[i] = spatial[i].round().clamp(0.0, 255.0) as u8;
+                    sp_i[i] = sp[i].round().clamp(0.0, 255.0) as u8;
                 }
-                let mut spatial_f = [0.0f32; BLOCK_AREA];
-                for i in 0..BLOCK_AREA { spatial_f[i] = spatial_int[i] as f32; }
+                let mut sp_f = [0.0f32; BLOCK_AREA];
+                for i in 0..BLOCK_AREA { sp_f[i] = sp_i[i] as f32; }
                 let mut verify = [0.0f32; BLOCK_AREA];
-                dct8x8(&spatial_f, &mut verify);
+                dct8x8(&sp_f, &mut verify);
 
                 let mut all_ok = true;
                 for (k, &idx) in EMBED_IDX.iter().enumerate() {
                     let bi = bit_start + k;
                     if bi >= bit_end { break; }
-                    let want = bits[bi];
-                    let got = qim_extract(verify[idx]);
-                    if want != got {
+                    if qim_extract(verify[idx]) != bits[bi] {
                         all_ok = false;
-                        let q_now = (verify[idx] / QIM_DELTA).round() as i32;
-                        let target_parity = want as i32;
-                        let q_adj = if ((q_now % 2) + 2) % 2 == target_parity {
-                            q_now
-                        } else {
-                            let up = q_now + 1;
-                            let down = q_now - 1;
-                            let d_up = (verify[idx] - (up as f32) * QIM_DELTA).abs();
-                            let d_down = (verify[idx] - (down as f32) * QIM_DELTA).abs();
-                            if d_down < d_up { down } else { up }
-                        };
-                        dct[idx] = q_adj as f32 * QIM_DELTA;
+                        let diff = verify[idx] - dct[idx];
+                        let target = qim_place(verify[idx], bits[bi]);
+                        dct[idx] = target - diff;
                     }
                 }
                 if all_ok { break; }
             }
 
+            // FINAL: always IDCT from the FINAL dct (after the last correction)
+            let mut final_sp = [0.0f32; BLOCK_AREA];
+            idct8x8(&dct, &mut final_sp);
             for yy in 0..8 {
                 for xx in 0..8 {
-                    let px = rgb.get_pixel_mut((x0 + xx) as u32, (y0 + yy) as u32);
-                    px.0[0] = spatial_int[yy * 8 + xx];
+                    let v = final_sp[yy * 8 + xx].round().clamp(0.0, 255.0) as u8;
+                    let px = rgb.get_pixel_mut(x0 + xx as u32, y0 + yy as u32);
+                    px.0[0] = v;
                 }
             }
-
-            if bit_i >= bits.len() { break 'outer; }
         }
     }
 
     if bit_i < bits.len() {
-        return Err(anyhow!("carrier ran out of capacity: wrote {} of {} bits", bit_i, bits.len()));
+        return Err(anyhow!("carrier ran out: wrote {} of {} bits", bit_i, bits.len()));
     }
 
     Ok(StegoOutcome {
@@ -216,17 +200,16 @@ pub fn extract(stego: &DynamicImage, password: &str) -> Result<Vec<u8>> {
     }
     let bx = (w / 8) as usize;
     let by = (h / 8) as usize;
-    let max_bits = bx * by * EMBED_IDX.len();
-    let mut bits: Vec<u8> = Vec::with_capacity(max_bits);
+    let mut bits: Vec<u8> = Vec::with_capacity(bx * by * EMBED_IDX.len());
 
     for byi in 0..by {
         for bxi in 0..bx {
-            let x0 = bxi * 8;
-            let y0 = byi * 8;
+            let x0 = (bxi * 8) as u32;
+            let y0 = (byi * 8) as u32;
             let mut block = [0.0f32; BLOCK_AREA];
             for yy in 0..8 {
                 for xx in 0..8 {
-                    let px = rgb.get_pixel((x0 + xx) as u32, (y0 + yy) as u32);
+                    let px = rgb.get_pixel(x0 + xx as u32, y0 + yy as u32);
                     block[yy * 8 + xx] = px.0[0] as f32;
                 }
             }
@@ -248,21 +231,26 @@ pub fn extract(stego: &DynamicImage, password: &str) -> Result<Vec<u8>> {
         raw.push(b);
     }
 
-    if raw.len() < 17 { return Err(anyhow!("stego header truncated")); }
-    if raw[0..4] != STEGO_MAGIC { return Err(anyhow!("no FMS1 magic")); }
+    if raw.len() < 17 {
+        return Err(anyhow!("stego header truncated ({} bytes)", raw.len()));
+    }
+    if raw[0..4] != STEGO_MAGIC {
+        let got: String = raw[0..4].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        return Err(anyhow!("no FMS1 magic (got bytes: {})", got));
+    }
     let fec_len = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
     let flags = raw[8];
     let mut hash = [0u8; 8];
     hash.copy_from_slice(&raw[9..17]);
 
     if 17 + fec_len > raw.len() {
-        return Err(anyhow!("stego stream truncated: need {}, have {}", 17 + fec_len, raw.len()));
+        return Err(anyhow!("stream truncated: need {}, have {}", 17 + fec_len, raw.len()));
     }
     let fec_bytes = &raw[17..17 + fec_len];
     let enc = fec::decode(fec_bytes).map_err(|e| anyhow!("fec: {}", e))?;
 
     let payload = if flags & 1 != 0 {
-        if password.is_empty() { return Err(anyhow!("password required for extraction")); }
+        if password.is_empty() { return Err(anyhow!("password required")); }
         crate::crypto::seal::open(password, &enc)
             .map_err(|_| anyhow!("wrong password or corrupted"))?
     } else {

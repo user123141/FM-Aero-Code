@@ -117,6 +117,7 @@ pub struct FmAeroApp {
     stego_text: String,
     stego_last_msg: String,
     stego_preview_tex: Option<egui::TextureHandle>,
+    stego_carrier_tex: Option<egui::TextureHandle>,
     stego_preview_dirty: bool,
 }
 
@@ -192,6 +193,7 @@ impl FmAeroApp {
             stego_text: String::new(),
             stego_last_msg: String::new(),
             stego_preview_tex: None,
+            stego_carrier_tex: None,
             stego_preview_dirty: false,
             settings,
             rx, tx,
@@ -1048,201 +1050,262 @@ impl FmAeroApp {
                 }
             }
             Tab::Stego => {
-                ui.heading("DCT Steganography");
-                ui.label(RichText::new("Embed any data into a photo. Photo looks natural. Extracts back bit-perfect.").weak());
-                ui.separator();
+                ui.horizontal_top(|ui| {
+                    // ================= LEFT: controls =================
+                    ui.vertical(|ui| {
+                        ui.set_min_width(340.0);
+                        ui.set_max_width(340.0);
+                        ScrollArea::vertical().show(ui, |ui| {
+                            ui.heading("Steganography");
+                            ui.label(RichText::new("Hide any data inside a normal photo. Photo looks unchanged.").weak());
+                            ui.add_space(6.0);
+                            ui.separator();
 
-                // ---- Embed section ----
-                ui.label(RichText::new("EMBED").strong());
-                ui.horizontal(|ui| {
-                    if ui.button("Load carrier photo").clicked() {
-                        if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("image", &["png", "jpg", "jpeg", "bmp", "webp"])
-                            .pick_file() {
-                            if let Ok(b) = std::fs::read(&p) {
-                                self.stego_carrier_name = p.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("cover.png").to_string();
-                                self.stego_carrier = Some(b);
+                            ui.heading("Carrier photo");
+                            ui.horizontal(|ui| {
+                                if ui.button("Load photo").clicked() {
+                                    if let Some(p) = rfd::FileDialog::new()
+                                        .add_filter("image", &["png", "jpg", "jpeg", "bmp", "webp"])
+                                        .pick_file() {
+                                        if let Ok(b) = std::fs::read(&p) {
+                                            self.stego_carrier_name = p.file_name()
+                                                .and_then(|n| n.to_str()).unwrap_or("cover").to_string();
+                                            self.stego_carrier = Some(b);
+                                            self.stego_carrier_tex = None;
+                                        }
+                                    }
+                                }
+                                if self.stego_carrier.is_some() {
+                                    if ui.small_button("x").clicked() {
+                                        self.stego_carrier = None;
+                                        self.stego_carrier_tex = None;
+                                        self.stego_carrier_name.clear();
+                                    }
+                                }
+                            });
+                            if !self.stego_carrier_name.is_empty() {
+                                ui.label(RichText::new(format!("[{}]", self.stego_carrier_name)).weak());
                             }
-                        }
-                    }
-                    if let Some(c) = self.stego_carrier.as_ref() {
-                        if let Ok(img) = image::load_from_memory(c) {
-                            let cap = crate::steganography::capacity_bytes(img.width(), img.height());
-                            ui.label(RichText::new(format!("{}x{} - cap {:.1} KB",
-                                img.width(), img.height(), cap as f64 / 1024.0)).weak());
-                        }
-                    }
-                });
-                if !self.stego_carrier_name.is_empty() {
-                    ui.label(RichText::new(format!("carrier: {}", self.stego_carrier_name)).weak());
-                }
 
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Load payload file").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
-                            if let Ok(b) = std::fs::read(&p) {
-                                self.stego_payload_name = p.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("secret.bin").to_string();
-                                self.stego_payload = Some(b);
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.heading("Payload");
+                            ui.horizontal(|ui| {
+                                if ui.button("Load file").clicked() {
+                                    if let Some(p) = rfd::FileDialog::new().pick_file() {
+                                        if let Ok(b) = std::fs::read(&p) {
+                                            self.stego_payload_name = p.file_name()
+                                                .and_then(|n| n.to_str()).unwrap_or("secret.bin").to_string();
+                                            self.stego_payload = Some(b);
+                                        }
+                                    }
+                                }
+                                if self.stego_payload.is_some() {
+                                    if ui.small_button("x").clicked() {
+                                        self.stego_payload = None;
+                                        self.stego_payload_name.clear();
+                                    }
+                                }
+                            });
+                            if let Some(p) = self.stego_payload.as_ref() {
+                                ui.label(RichText::new(format!("[{}] {} B",
+                                    self.stego_payload_name, p.len())).weak());
+                            } else {
+                                ui.label(RichText::new("or type text:").weak());
+                                ui.add(egui::TextEdit::multiline(&mut self.stego_text)
+                                    .desired_rows(3)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("secret message"));
                             }
-                        }
-                    }
-                    if self.stego_payload.is_some() {
-                        if ui.small_button("x").clicked() { self.stego_payload = None; self.stego_payload_name.clear(); }
-                    }
-                });
-                if let Some(p) = self.stego_payload.as_ref() {
-                    ui.label(RichText::new(format!("file: {} ({} B)",
-                        self.stego_payload_name, p.len())).weak());
-                } else {
-                    ui.label(RichText::new("Or type text to embed:").weak());
-                    ui.add(egui::TextEdit::multiline(&mut self.stego_text)
-                        .desired_rows(2).desired_width(f32::INFINITY)
-                        .hint_text("secret message"));
-                }
 
-                ui.add_space(4.0);
-                ui.checkbox(&mut self.use_encryption, "Encrypt payload (uses password from Encryption panel)");
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.heading("Options");
+                            ui.checkbox(&mut self.use_encryption, "Encrypt (uses password from Encryption panel)");
 
-                // Capacity bar
-                if let Some(c) = self.stego_carrier.as_ref() {
-                    if let Ok(img) = image::load_from_memory(c) {
-                        let cap = crate::steganography::capacity_bytes(img.width(), img.height());
-                        let payload_len = self.stego_payload.as_ref().map(|p| p.len())
-                            .unwrap_or_else(|| self.stego_text.len());
-                        let est = payload_len * 255 / 223 + 32;
-                        let frac = if cap > 0 { (est as f32) / (cap as f32) } else { 0.0 };
-                        let color = if frac > 1.0 {
-                            Color32::from_rgb(255, 120, 120)
-                        } else if frac > 0.85 {
-                            Color32::from_rgb(255, 200, 100)
-                        } else {
-                            Color32::from_rgb(120, 220, 140)
-                        };
-                        ui.add(egui::ProgressBar::new(frac.min(1.0))
-                            .desired_width(ui.available_width())
-                            .fill(color)
-                            .text(format!("{}/{} B ({:.0}%)", est, cap, frac * 100.0)));
-                    }
-                }
-
-                ui.add_space(4.0);
-                let can_embed = self.stego_carrier.is_some()
-                    && (self.stego_payload.is_some() || !self.stego_text.is_empty())
-                    && !self.busy;
-                let ready = can_embed;
-                ui.add_enabled_ui(ready, |ui| {
-                    if ui.add_sized([ui.available_width(), 34.0],
-                        egui::Button::new(RichText::new("Embed into photo").strong())).clicked() {
-                        self.stego_encode();
-                    }
-                    if ui.add_sized([ui.available_width(), 30.0],
-                        egui::Button::new("Test round-trip (verify)")).clicked() {
-                        self.stego_test_roundtrip();
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.separator();
-
-                // ---- Extract section ----
-                ui.label(RichText::new("EXTRACT").strong());
-                ui.horizontal(|ui| {
-                    if ui.button("Load stego image for extraction").clicked() {
-                        if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("image", &["png", "jpg", "jpeg", "bmp", "webp"])
-                            .pick_file() {
-                            if let Ok(b) = std::fs::read(&p) {
-                                self.stego_extract_src_name = p.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("stego.png").to_string();
-                                self.stego_extract_src = Some(b);
+                            if let Some(c) = self.stego_carrier.as_ref() {
+                                if let Ok(img) = image::load_from_memory(c) {
+                                    let cap = crate::steganography::capacity_bytes(img.width(), img.height());
+                                    let payload_len = self.stego_payload.as_ref().map(|p| p.len())
+                                        .unwrap_or_else(|| self.stego_text.len());
+                                    let est = payload_len * 255 / 223 + 32;
+                                    let frac = if cap > 0 { (est as f32) / (cap as f32) } else { 0.0 };
+                                    let color = if frac > 1.0 {
+                                        Color32::from_rgb(255, 120, 120)
+                                    } else if frac > 0.85 {
+                                        Color32::from_rgb(255, 200, 100)
+                                    } else {
+                                        Color32::from_rgb(120, 220, 140)
+                                    };
+                                    ui.add_space(4.0);
+                                    ui.label(RichText::new(format!("{}x{} - capacity {} B",
+                                        img.width(), img.height(), cap)).weak());
+                                    ui.add(egui::ProgressBar::new(frac.min(1.0))
+                                        .desired_width(ui.available_width())
+                                        .fill(color)
+                                        .text(format!("{}/{} B ({:.0}%)", est, cap, frac * 100.0)));
+                                }
                             }
-                        }
-                    }
-                    if ui.small_button("Clear").clicked() {
-                        self.stego_extract_src = None;
-                        self.stego_extract_src_name.clear();
-                    }
-                });
-                if !self.stego_extract_src_name.is_empty() {
-                    ui.label(RichText::new(format!("source: {}", self.stego_extract_src_name)).weak());
-                } else {
-                    ui.label(RichText::new("(empty - will use last embedded output)").weak());
-                }
 
-                ui.add_space(4.0);
-                let can_extract = (self.stego_extract_src.is_some()
-                    || self.stego_output.is_some()
-                    || self.stego_carrier.is_some()) && !self.busy;
-                ui.add_enabled_ui(can_extract, |ui| {
-                    if ui.add_sized([ui.available_width(), 34.0],
-                        egui::Button::new("Extract payload")).clicked() {
-                        self.stego_decode();
-                    }
-                });
+                            ui.add_space(8.0);
+                            let ready = self.stego_carrier.is_some()
+                                && (self.stego_payload.is_some() || !self.stego_text.is_empty())
+                                && !self.busy;
+                            ui.add_enabled_ui(ready, |ui| {
+                                if ui.add_sized([ui.available_width(), 36.0],
+                                    egui::Button::new(RichText::new("EMBED into photo").strong())).clicked() {
+                                    self.stego_encode();
+                                }
+                                if ui.add_sized([ui.available_width(), 30.0],
+                                    egui::Button::new("Test round-trip (verify)")).clicked() {
+                                    self.stego_test_roundtrip();
+                                }
+                            });
 
-                ui.add_space(10.0);
-                ui.separator();
-
-                // ---- Output ----
-                if !self.stego_last_msg.is_empty() {
-                    ui.colored_label(
-                        Color32::from_rgb(120, 200, 255),
-                        RichText::new(&self.stego_last_msg).strong()
-                    );
-                }
-                // Load preview texture if dirty
-                if self.stego_preview_dirty {
-                    if let Some((bytes, _)) = self.stego_output.as_ref() {
-                        if bytes.len() > 8 && bytes[0..8] == [0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A] {
-                            if let Ok(img) = image::load_from_memory(bytes) {
-                                let rgba = img.to_rgba8();
-                                let (w, h) = (rgba.width(), rgba.height());
-                                let ci = egui::ColorImage::from_rgba_unmultiplied(
-                                    [w as usize, h as usize], rgba.as_raw());
-                                self.stego_preview_tex = Some(ui.ctx().load_texture(
-                                    "stego_preview", ci, egui::TextureOptions::LINEAR));
-                                self.stego_preview_dirty = false;
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.heading("Extract");
+                            ui.horizontal(|ui| {
+                                if ui.button("Load stego image").clicked() {
+                                    if let Some(p) = rfd::FileDialog::new()
+                                        .add_filter("image", &["png", "jpg", "jpeg", "bmp"])
+                                        .pick_file() {
+                                        if let Ok(b) = std::fs::read(&p) {
+                                            self.stego_extract_src_name = p.file_name()
+                                                .and_then(|n| n.to_str()).unwrap_or("stego.png").to_string();
+                                            self.stego_extract_src = Some(b);
+                                        }
+                                    }
+                                }
+                                if ui.small_button("Clear").clicked() {
+                                    self.stego_extract_src = None;
+                                    self.stego_extract_src_name.clear();
+                                }
+                            });
+                            if !self.stego_extract_src_name.is_empty() {
+                                ui.label(RichText::new(format!("source: {}", self.stego_extract_src_name)).weak());
+                            } else {
+                                ui.label(RichText::new("(empty - will use last embedded output)").weak());
                             }
-                        }
-                    }
-                }
-                if let Some(tex) = self.stego_preview_tex.as_ref() {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("Output preview:").strong());
-                    let avail_w = ui.available_width().min(280.0);
-                    ui.image((tex.id(), egui::vec2(avail_w, avail_w * 0.75)));
-                }
-                if let Some((bytes, name)) = self.stego_output.as_ref() {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(format!("output: {} ({:.1} KB)",
-                        name, bytes.len() as f64 / 1024.0)).weak());
-                    if ui.add_sized([ui.available_width(), 34.0],
-                        egui::Button::new("Save output")).clicked() {
-                        let n = name.clone();
-                        let b = bytes.clone();
-                        if let Some(p) = rfd::FileDialog::new().set_file_name(&n).save_file() {
-                            if std::fs::write(&p, &b).is_ok() {
-                                self.push(format!("saved {}", p.display()));
-                            }
-                        }
-                    }
-                }
+                            let can_ex = (self.stego_extract_src.is_some()
+                                || self.stego_output.is_some()
+                                || self.stego_carrier.is_some()) && !self.busy;
+                            ui.add_enabled_ui(can_ex, |ui| {
+                                if ui.add_sized([ui.available_width(), 36.0],
+                                    egui::Button::new(RichText::new("EXTRACT payload").strong())).clicked() {
+                                    self.stego_decode();
+                                }
+                            });
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label(RichText::new("How it works").strong());
-                ui.label(RichText::new("1. Load a normal photo as carrier").weak());
-                ui.label(RichText::new("2. Load a secret file OR type text").weak());
-                ui.label(RichText::new("3. Click Embed - photo looks unchanged").weak());
-                ui.label(RichText::new("4. Click Save output, then Load it back for extraction").weak());
-                ui.label(RichText::new("Data lives in high-freq DCT coefficients (invisible).").weak());
-            }            Tab::About => {
+                            if let Some((bytes, name)) = self.stego_output.as_ref() {
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.label(RichText::new(format!("Output: {} ({:.1} KB)",
+                                    name, bytes.len() as f64 / 1024.0)).weak());
+                                if ui.add_sized([ui.available_width(), 32.0],
+                                    egui::Button::new("Save output")).clicked() {
+                                    let n = name.clone();
+                                    let b = bytes.clone();
+                                    if let Some(p) = rfd::FileDialog::new().set_file_name(&n).save_file() {
+                                        if std::fs::write(&p, &b).is_ok() {
+                                            self.push(format!("saved {}", p.display()));
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    });
+
+                    ui.separator();
+
+                    // ================= RIGHT: preview =================
+                    ui.vertical(|ui| {
+                        ScrollArea::vertical().show(ui, |ui| {
+                            ui.heading("Preview");
+                            ui.add_space(4.0);
+
+                            if self.stego_carrier_tex.is_none() {
+                                if let Some(c) = self.stego_carrier.as_ref() {
+                                    if let Ok(img) = image::load_from_memory(c) {
+                                        let rgba = img.to_rgba8();
+                                        let (w, h) = (rgba.width(), rgba.height());
+                                        let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                            [w as usize, h as usize], rgba.as_raw());
+                                        self.stego_carrier_tex = Some(ui.ctx().load_texture(
+                                            "stego_carrier", ci, egui::TextureOptions::LINEAR));
+                                    }
+                                }
+                            }
+                            if self.stego_preview_dirty {
+                                if let Some((bytes, _)) = self.stego_output.as_ref() {
+                                    if bytes.len() > 8
+                                        && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+                                        if let Ok(img) = image::load_from_memory(bytes) {
+                                            let rgba = img.to_rgba8();
+                                            let (w, h) = (rgba.width(), rgba.height());
+                                            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                                [w as usize, h as usize], rgba.as_raw());
+                                            self.stego_preview_tex = Some(ui.ctx().load_texture(
+                                                "stego_preview", ci, egui::TextureOptions::LINEAR));
+                                            self.stego_preview_dirty = false;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let avail_w = ui.available_width();
+                            let have_any = self.stego_carrier_tex.is_some() || self.stego_preview_tex.is_some();
+                            if !have_any {
+                                ui.add_space(80.0);
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(RichText::new(
+                                        "Load a photo and click EMBED to see preview").weak());
+                                });
+                            } else {
+                                ui.horizontal_top(|ui| {
+                                    let col_w = (avail_w - 16.0) / 2.0;
+                                    ui.vertical(|ui| {
+                                        ui.set_min_width(col_w);
+                                        ui.set_max_width(col_w);
+                                        ui.label(RichText::new("Carrier").strong());
+                                        if let Some(tex) = self.stego_carrier_tex.as_ref() {
+                                            let tw = col_w.min(340.0);
+                                            let th = tw * 0.72;
+                                            ui.add(egui::Image::new((tex.id(), egui::vec2(tw, th)))
+                                                .maintain_aspect_ratio(true));
+                                        } else {
+                                            ui.label(RichText::new("(none)").weak());
+                                        }
+                                    });
+                                    ui.vertical(|ui| {
+                                        ui.set_min_width(col_w);
+                                        ui.set_max_width(col_w);
+                                        ui.label(RichText::new("Stego output").strong());
+                                        if let Some(tex) = self.stego_preview_tex.as_ref() {
+                                            let tw = col_w.min(340.0);
+                                            let th = tw * 0.72;
+                                            ui.add(egui::Image::new((tex.id(), egui::vec2(tw, th)))
+                                                .maintain_aspect_ratio(true));
+                                        } else {
+                                            ui.label(RichText::new("(embed to generate)").weak());
+                                        }
+                                    });
+                                });
+                            }
+
+                            if !self.stego_last_msg.is_empty() {
+                                ui.add_space(10.0);
+                                ui.separator();
+                                ui.colored_label(
+                                    Color32::from_rgb(120, 200, 255),
+                                    RichText::new(&self.stego_last_msg).strong()
+                                );
+                            }
+                        });
+                    });
+                });
+            }
+            Tab::About => {
                 ui.heading("FM Aero Code 2");
                 ui.label(RichText::new(format!("Version {}", VERSION))
                     .color(Color32::from_rgb(120, 200, 255)));
