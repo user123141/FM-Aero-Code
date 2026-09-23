@@ -167,6 +167,14 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
   <div class="view" id="view-create">
     <div class="create-body">
       <div class="section">
+        <div class="section-label">Mode</div>
+        <div style="display:flex;gap:8px;background:rgba(255,255,255,.04);padding:5px;border-radius:14px;border:1px solid var(--border)">
+          <button type="button" id="mode-aeroglint" class="tab active" style="flex:1;padding:10px 8px;font:600 12px inherit;border:0;border-radius:10px;background:rgba(255,255,255,.1);color:var(--fg);cursor:pointer">AeroGlint</button>
+          <button type="button" id="mode-stego" class="tab" style="flex:1;padding:10px 8px;font:600 12px inherit;border:0;border-radius:10px;background:transparent;color:var(--fg-2);cursor:pointer">Stego</button>
+        </div>
+        <div style="font-size:11px;color:var(--fg-3);margin-top:6px;line-height:1.4" id="mode-hint">Printable spectral pattern.</div>
+      </div>
+      <div class="section">
         <div class="section-label">Source</div>
         <div class="drop-zone" id="drop-zone">
           <div class="plus">+</div>
@@ -211,7 +219,8 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 <div class="toast" id="toast"></div>
 <script type="module">
 import init, {
-  encode_payload_wasm, decode_payload_wasm,
+  encode_payload_wasm, encode_payload_wasm_ex, decode_payload_wasm,
+  stego_embed_wasm, stego_extract_wasm, stego_capacity_wasm,
   WasmScanner, camera_constraints_json, wasm_version
 } from "./pkg/fm_aero_code_2.js";
 const $ = (id) => document.getElementById(id);
@@ -224,6 +233,7 @@ const toast = (msg, kind) => {
   t._t = setTimeout(() => t.classList.remove("show"), 2400);
 };
 let wasm_ready = false, currentStream = null, facingFront = false;
+let encodeMode = "aeroglint";
 let autoInterval = null;
 let scanner = null, lastResult = null, selectedFile = null;
 async function initWasm() {
@@ -375,7 +385,27 @@ $("btn-encode").onclick = async () => {
   $("create-status").innerHTML = "<span class=k>Encoding</span><span class=v>" + data.length + " B</span>";
   try {
     const resilience = document.getElementById("resilience").checked ? 4 : 0;
-    if (!png.length) { toast("Encode failed", "err"); return; }
+    let png;
+    if (encodeMode === "stego") {
+      if (!selectedFile || !/^image\//.test(selectedFile.type)) {
+        toast("Stego: pick an image carrier", "warn");
+        $("create-status").innerHTML = "<span class=k>Stego needs an image carrier</span>";
+        return;
+      }
+      const carrierBytes = new Uint8Array(await selectedFile.arrayBuffer());
+      const payload = data;
+      png = stego_embed_wasm(carrierBytes, payload, password);
+      if (!png || !png.length) {
+        toast("Stego embed failed (payload too big?)", "err");
+        return;
+      }
+    } else {
+      png = encode_payload_wasm_ex(data, password, filename, resilience, false, false, false);
+      if (!png || !png.length) {
+        toast("Encode failed", "err");
+        return;
+      }
+    }
     const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
     $("preview-area").style.display = "block";
     $("preview-area").innerHTML = "<img src=" + url + " alt=pattern>";
@@ -418,6 +448,27 @@ $("btn-result-save").onclick = () => {
 function escapeHtml(s) {
   return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
+(function () {
+  const ag = document.getElementById("mode-aeroglint");
+  const st = document.getElementById("mode-stego");
+  const hint = document.getElementById("mode-hint");
+  const drop = document.getElementById("drop-zone");
+  function setMode(m) {
+    encodeMode = m;
+    if (m === "aeroglint") {
+      ag.style.background = "rgba(255,255,255,.1)"; ag.style.color = "var(--fg)";
+      st.style.background = "transparent"; st.style.color = "var(--fg-2)";
+      hint.textContent = "Printable spectral pattern.";
+    } else {
+      st.style.background = "rgba(255,255,255,.1)"; st.style.color = "var(--fg)";
+      ag.style.background = "transparent"; ag.style.color = "var(--fg-2)";
+      hint.textContent = "Hide data inside a normal photo (carrier = source image).";
+    }
+  }
+  ag.onclick = () => setMode("aeroglint");
+  st.onclick = () => setMode("stego");
+})();
+
 initWasm().then(() => startCamera(false));
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("./sw.js").catch(() => {});
