@@ -19,6 +19,13 @@ fn main() -> Result<()> {
     }
     let cmd = a[1].as_str();
 
+    if cmd == "keygen" {
+        let (seed, pk) = fm_aero_code_2::steganography::generate_signing_keypair();
+        println!("seed (hex):   {}", seed);
+        println!("pubkey (hex): {}", pk);
+        return Ok(());
+    }
+
     if cmd == "capacity" {
         if a.len() < 3 { return Err(anyhow!("missing image")); }
         let img = image::open(&a[2])?;
@@ -31,6 +38,7 @@ fn main() -> Result<()> {
     // Parse optional flags
     let mut password = String::new();
     let mut use_robust = false;
+    let mut sign_seed = String::new();
     let mut i = 2;
     while i < a.len() {
         if a[i] == "--password" && i + 1 < a.len() {
@@ -39,6 +47,9 @@ fn main() -> Result<()> {
         } else if a[i] == "--robust" {
             use_robust = true;
             i += 1;
+        } else if a[i] == "--sign" && i + 1 < a.len() {
+            sign_seed = a[i + 1].clone();
+            i += 2;
         } else { i += 1; }
     }
 
@@ -52,6 +63,20 @@ fn main() -> Result<()> {
             let opts = StegoOptions {
                 password: password.clone(),
                 original_name: name.clone(),
+            author: String::new(),
+            license: String::new(),
+        signing_seed: {
+                    let s = sign_seed.trim();
+                    if s.len() == 64 {
+                        if let Ok(b) = hex::decode(s) {
+                            if b.len() == 32 {
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&b);
+                                Some(arr)
+                            } else { None }
+                        } else { None }
+                    } else { None }
+                },
                 mode: if use_robust { fm_aero_code_2::steganography::StegoMode::Robust } else { fm_aero_code_2::steganography::StegoMode::BitPerfect },
             };
             let r = embed(&carrier, &payload, &opts)?;

@@ -121,6 +121,12 @@ pub struct FmAeroApp {
     stego_extract_src: Option<Vec<u8>>,
     stego_extract_src_name: String,
     stego_text: String,
+    stego_author: String,
+    stego_license: String,
+    stego_signing_seed: String,
+    stego_last_pubkey: String,
+    stego_sig_status: Option<bool>,
+    stego_signer_hex: String,
     stego_last_msg: String,
     stego_decoded: Option<(String, String, usize, String)>,
     stego_decoded_preview: Option<egui::TextureHandle>,
@@ -202,6 +208,12 @@ impl FmAeroApp {
             stego_extract_src: None,
             stego_extract_src_name: String::new(),
             stego_text: String::new(),
+            stego_author: String::new(),
+            stego_license: String::new(),
+            stego_signing_seed: String::new(),
+            stego_last_pubkey: String::new(),
+            stego_sig_status: None,
+            stego_signer_hex: String::new(),
             stego_last_msg: String::new(),
             stego_decoded: None,
             stego_decoded_preview: None,
@@ -605,6 +617,20 @@ impl FmAeroApp {
                     password: password.clone(),
                     original_name: name.clone(),
                     mode: self.stego_mode,
+                    author: self.stego_author.clone(),
+                    license: self.stego_license.clone(),
+                    signing_seed: {
+                        let s = self.stego_signing_seed.trim();
+                        if s.len() == 64 {
+                            if let Ok(bytes) = hex::decode(s) {
+                                if bytes.len() == 32 {
+                                    let mut arr = [0u8; 32];
+                                    arr.copy_from_slice(&bytes);
+                                    Some(arr)
+                                } else { None }
+                            } else { None }
+                        } else { None }
+                    },
                 };
                 match crate::steganography::embed(&carrier, &payload, &opts) {
                     Ok(out) => {
@@ -626,6 +652,7 @@ impl FmAeroApp {
                         let stem = std::path::Path::new(&self.stego_carrier_name)
                             .file_stem().and_then(|s| s.to_str()).unwrap_or("output");
                         let out_name = format!("stego_{}.png", stem);
+                        if out.signed { self.stego_last_pubkey = out.signer_pubkey.clone(); }
                         self.stego_output = Some((png, out_name));
                         self.stego_preview_dirty = true;
                     }
@@ -673,6 +700,8 @@ impl FmAeroApp {
                     self.push(msg.clone());
                     self.stego_last_msg = msg;
                     self.stego_decoded_preview_dirty = true;
+                    self.stego_sig_status = r.signature_ok;
+                    self.stego_signer_hex = r.signer_pubkey.clone();
                     self.stego_decoded = Some((
                         out_name.clone(),
                         kind.label().to_string(),
@@ -719,6 +748,20 @@ impl FmAeroApp {
             password: password.clone(),
             original_name: name,
             mode: self.stego_mode,
+            author: self.stego_author.clone(),
+            license: self.stego_license.clone(),
+            signing_seed: {
+                let s = self.stego_signing_seed.trim();
+                if s.len() == 64 {
+                    if let Ok(bytes) = hex::decode(s) {
+                        if bytes.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&bytes);
+                            Some(arr)
+                        } else { None }
+                    } else { None }
+                } else { None }
+            },
         };
         let out = match crate::steganography::embed(&carrier, &payload, &opts) {
             Ok(o) => o,
@@ -819,6 +862,42 @@ impl FmAeroApp {
                     .desired_rows(3)
                     .desired_width(f32::INFINITY)
                     .hint_text("secret message"));
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.heading("Metadata (optional)");
+            ui.horizontal(|ui| {
+                ui.label("Author:");
+                ui.add(egui::TextEdit::singleline(&mut self.stego_author)
+                    .desired_width(ui.available_width() - 70.0)
+                    .hint_text("your name or signature"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("License:");
+                ui.add(egui::TextEdit::singleline(&mut self.stego_license)
+                    .desired_width(ui.available_width() - 70.0)
+                    .hint_text("CC-BY-4.0, MIT, ..."));
+            });
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("Signing key (Ed25519)").strong());
+            ui.label(RichText::new("64 hex chars = 32-byte seed. Optional.").weak());
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.stego_signing_seed)
+                    .password(true)
+                    .desired_width(ui.available_width() - 90.0)
+                    .hint_text("hex seed (empty = unsigned)"));
+                if ui.small_button("New").clicked() {
+                    let (seed, pk) = crate::steganography::generate_signing_keypair();
+                    self.stego_signing_seed = seed;
+                    self.stego_last_pubkey = pk.clone();
+                    self.push(format!("New signing key generated. Public key: {}", pk));
+                }
+            });
+            if !self.stego_last_pubkey.is_empty() {
+                ui.label(RichText::new(format!("Current pubkey: {}", &self.stego_last_pubkey[..16.min(self.stego_last_pubkey.len())]))
+                    .weak());
             }
 
             ui.add_space(6.0);
@@ -1026,6 +1105,18 @@ impl FmAeroApp {
                 ui.label(RichText::new("SHA:").weak());
                 ui.label(RichText::new(sha_short).weak().monospace());
             });
+            if let Some(ok) = self.stego_sig_status {
+                let (txt, color) = if ok {
+                    ("Signature: VALID", Color32::from_rgb(120, 220, 140))
+                } else {
+                    ("Signature: INVALID", Color32::from_rgb(255, 120, 120))
+                };
+                ui.colored_label(color, RichText::new(txt).strong());
+                if !self.stego_signer_hex.is_empty() {
+                    ui.label(RichText::new(format!("Signer: {}...",
+                        &self.stego_signer_hex[..16.min(self.stego_signer_hex.len())])).weak());
+                }
+            }
 
             // Preview based on kind
             if let Some((bytes, _)) = self.stego_output.as_ref() {

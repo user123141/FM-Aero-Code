@@ -249,6 +249,10 @@ pub fn stego_embed_wasm(carrier_png: &[u8], payload: &[u8], password: &str) -> V
     let opts = crate::steganography::StegoOptions {
         password: password.to_string(),
         original_name: String::new(),
+        mode: crate::steganography::StegoMode::BitPerfect,
+        author: String::new(),
+        license: String::new(),
+        signing_seed: None,
     };
     let Ok(out) = crate::steganography::embed(&carrier, payload, &opts) else { return Vec::new(); };
     let mut png: Vec<u8> = Vec::new();

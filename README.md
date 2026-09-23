@@ -199,3 +199,45 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed plan.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+## Why FM Aero Code beats GPG / detached signatures
+
+Traditional signatures (GPG, PKI) live in a **separate file** (`.sig`, `.asc`). They are:
+
+- **Detachable** - a sender or CDN can strip the signature; the file still opens
+- **Visible** - everyone sees "this file has a signature"; your watermarking is not covert
+- **Fragile** - any re-encoding (JPEG, screenshot, print) destroys the signature
+- **Opaque** - end user needs a GPG-compatible client, key management, trust chains
+
+FM Aero Code's stego channel embeds the signature **inside the pixels**:
+
+| Property | GPG | FM Aero Code (FMS3) |
+|---|---|---|
+| Signature is visible in file | yes (`.sig`/`.asc`) | **no** (hidden in DCT/LSB) |
+| Detachable without damage | yes | **no** (part of the image) |
+| Survives JPEG q>=85 | no | **yes** (Robust mode) |
+| Survives screenshots | no | yes (Robust mode) |
+| Self-contained (no external file) | no | **yes** |
+| Author + license + timestamp bound | partially | **yes (single Ed25519 sig)** |
+| Verifier needs special tool | gpg | any browser (WASM) |
+| Covert watermarking | no | **yes** |
+| AI-inpainting detector | no | **yes** (hash binding) |
+| Print-friendly | no | **yes** (AeroGlint side) |
+
+**Use cases GPG cannot solve:**
+- Prove authenticity of a photo posted on social media (JPEG-recompressed)
+- Protect art from AI-inpainting (any re-paint invalidates hash + signature)
+- Ship legal documents with author + license + timestamp embedded invisibly
+- Print a certificate with hidden authenticity check
+- Watermark photos before sharing (BitPerfect for PNG, Robust for Instagram)
+
+**Attack that GPG cannot stop but FMS3 can detect:**
+- AI re-generates the photo -> Robust layer corrupted -> signature invalid
+- Editor removes author metadata -> signature invalid (author is in signed JSON)
+- Attacker replaces file with lookalike -> hash mismatch
+- Malicious timestamp -> signature invalid
+
+**Long-term roadmap:**
+- v4.x: **Dual-layer** (BitPerfect detects tampering + Robust survives re-encode)
+- v4.x: **Chain of custody** - each re-sign adds a block
+- v5.x: **Blockchain anchor** - timestamp cross-verified on public chain
+- v5.x: **Multi-signature** - author + timestamp authority + validator
