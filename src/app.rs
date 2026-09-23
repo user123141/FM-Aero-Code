@@ -836,8 +836,8 @@ impl FmAeroApp {
                         Color32::from_rgb(120, 220, 140)
                     };
                     ui.add_space(4.0);
-                    ui.label(RichText::new(format!("{}x{} - capacity {} B",
-                        img.width(), img.height(), cap)).weak());
+                    ui.label(RichText::new(format!("{}x{} - {} cap {} B",
+                        img.width(), img.height(), self.stego_mode.short(), cap)).weak());
                     ui.add(egui::ProgressBar::new(frac.min(1.0))
                         .desired_width(ui.available_width())
                         .fill(color)
