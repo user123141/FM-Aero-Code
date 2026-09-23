@@ -77,3 +77,9 @@ pub const EMBED_IDX: [usize; 54] = [
     50, 51, 52, 53, 54, 55, 56, 57,
     58, 59, 60, 61, 62, 63,
 ];
+
+/// LSB mode: 11 mid-frequency AC coefficients per 8x8 block.
+/// These survive IDCT -> round -> DCT with bit-perfect precision.
+pub const EMBED_IDX_LSB: [usize; 11] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+pub const LSB_BITS_PER_BLOCK: usize = EMBED_IDX_LSB.len();

@@ -32,8 +32,17 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.12.1 --locked
+      - name: Install binaryen
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y binaryen
+
       - name: Build WASM
         run: wasm-pack build --target web --out-dir web/pkg --no-default-features --features wasm
+
+      - name: Optimize WASM
+        run: |
+          find web/pkg -name "*.wasm" -exec wasm-opt -Oz {} -o {} \;
       - name: Prepare site
         run: |
           mkdir -p _site

@@ -123,6 +123,18 @@ impl WasmScanner {
         self.last_noise_floor = 0.0;
     }
     pub fn received_count(&self) -> u32 { self.pages.len() as u32 }
+
+    /// Pages we still need (ARQ feedback). Empty if complete or not started.
+    pub fn missing_pages(&self) -> Vec<u16> {
+        if self.total == 0 { return Vec::new(); }
+        (0..self.total).filter(|i| !self.pages.contains_key(i)).collect()
+    }
+
+    /// Comma-separated list of missing page indices, for UI display.
+    pub fn missing_pages_str(&self) -> String {
+        self.missing_pages().iter().map(|i| i.to_string())
+            .collect::<Vec<_>>().join(",")
+    }
     pub fn total_count(&self) -> u32 { self.total as u32 }
 
     pub fn feed_frame(&mut self, rgba: &[u8], w: u32, h: u32, password: &str) -> String {

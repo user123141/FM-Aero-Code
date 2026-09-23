@@ -157,6 +157,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
       <button class="btn icon" id="btn-flip">Flip</button>
       <button class="btn icon" id="btn-light">Light</button>
       <button class="btn primary" id="btn-capture">Capture</button>
+      <button class="btn icon" id="btn-auto">Auto</button>
       <button class="btn icon" id="btn-reset">Reset</button>
     </div>
   </div>
@@ -220,6 +221,7 @@ const toast = (msg, kind) => {
   t._t = setTimeout(() => t.classList.remove("show"), 2400);
 };
 let wasm_ready = false, currentStream = null, facingFront = false;
+let autoInterval = null;
 let scanner = null, lastResult = null, selectedFile = null;
 async function initWasm() {
   try {
@@ -258,6 +260,17 @@ $("btn-light").onclick = async () => {
   const track = currentStream.getVideoTracks()[0];
   try { await track.applyConstraints({ advanced: [{ torch: true }] }); }
   catch { toast("No torch", "warn"); }
+};
+$("btn-auto").onclick = () => {
+  if (autoInterval) {
+    clearInterval(autoInterval); autoInterval = null;
+    $("btn-auto").classList.remove("primary");
+    toast("Auto OFF");
+  } else {
+    $("btn-auto").classList.add("primary");
+    toast("Auto ON");
+    autoInterval = setInterval(() => { try { $("btn-capture").click(); } catch (e) {} }, 900);
+  }
 };
 $("btn-reset").onclick = () => {
   if (scanner) scanner.reset();
