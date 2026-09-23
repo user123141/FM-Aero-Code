@@ -25,6 +25,8 @@ fn main() -> Result<()> {
         "list" => list(&args)?,
         "add" => add(&args)?,
         "verify" => verify(&args)?,
+        "tsa" => tsa(&args)?,
+        "ots" => ots(&args)?,
         "--help" | "-h" => print_help(),
         other => {
             eprintln!("Unknown command: {}", other);
@@ -43,6 +45,10 @@ fn print_help() {
     println!("  add    <file.png> --purpose <role> --seed <hex64>  Add a signature");
     println!("  verify <file.png>                                  Verify all signatures");
     println!("  --help                                             This message");
+    println!();
+    println!("Time-stamp:");
+    println!("  tsa  <file.png> [--url URL]   RFC 3161 TSA request");
+    println!("  ots  <file.png>               OpenTimestamps stamp");
     println!();
     println!("Roles: author, validator, witness, timestamper, ...");
 }
@@ -207,4 +213,60 @@ fn verify(args: &[String]) -> Result<()> {
             Ok(())
         }
     }
+}
+
+
+fn tsa(args: &[String]) -> Result<()> {
+    use fm_aero_code_2::decoder::pipeline::split_header_payload_ms;
+    let path = args.get(2).ok_or_else(|| anyhow!("missing file"))?.to_string();
+    let mut url = "http://freetsa.org/tsr".to_string();
+    let mut i = 3usize;
+    while i < args.len() {
+        if args[i] == "--url" && i + 1 < args.len() {
+            url = args[i + 1].clone();
+            i += 2;
+        } else { i += 1; }
+    }
+
+    let bytes = std::fs::read(&path)?;
+    let (h, payload, existing_ms) = split_header_payload_ms(&bytes)?;
+    let mut clean = Vec::with_capacity(128 + payload.len());
+    clean.extend_from_slice(&h.to_bytes());
+    clean.extend_from_slice(&payload);
+
+    let hash = fm_aero_code_2::tsa::sha256(&clean);
+    println!("TSA server: {}", url);
+    println!("Message hash: {}", hex::encode(hash));
+    let token = fm_aero_code_2::tsa::request(&hash, &url)?;
+    println!("Received {} bytes", token.len());
+
+    let mut block = existing_ms.unwrap_or_default();
+    block.tsa_server = Some(url.clone());
+    block.tsa_token_b64 = Some(base64_enc(&token));
+
+    let fmex = block.encode_block();
+    let mut out = Vec::with_capacity(128 + fmex.len() + payload.len());
+    out.extend_from_slice(&h.to_bytes());
+    out.extend_from_slice(&fmex);
+    out.extend_from_slice(&payload);
+    std::fs::write(&path, out)?;
+
+    let tsr_path = format!("{}.tsr", path);
+    std::fs::write(&tsr_path, &token)?;
+    println!("Wrote {}", tsr_path);
+    Ok(())
+}
+
+fn ots(args: &[String]) -> Result<()> {
+    let path = args.get(2).ok_or_else(|| anyhow!("missing file"))?;
+    match fm_aero_code_2::tsa::try_opentimestamps(path)? {
+        Some(p) => println!("Wrote {}", p),
+        None => println!("ots CLI not found (install from opentimestamps.org)"),
+    }
+    Ok(())
+}
+
+fn base64_enc(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }

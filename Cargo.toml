@@ -1,6 +1,6 @@
 [package]
 name = "fm_aero_code_2"
-version = "3.11.4"
+version = "3.11.7"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]
@@ -54,6 +54,7 @@ name = "fm_sign"
 path = "src/bin/fm_sign.rs"
 
 [dependencies]
+ureq = { version = "2", default-features = false, features = ["tls"] }
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image        = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 png          = "0.17"

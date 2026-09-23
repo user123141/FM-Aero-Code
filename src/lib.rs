@@ -27,6 +27,7 @@ pub mod layered;
 pub mod identity;
 pub mod trust;
 pub mod multisig;
+pub mod tsa;
 
 #[cfg(feature = "gui")]
 pub mod app;
@@ -44,7 +45,7 @@ pub mod build_info {
 
 pub const FORMAT_VERSION: u8 = 2;
 pub const AUTHOR: &str = "Maksym Skorina";
-pub const VERSION: &str = "3.11.4";
+pub const VERSION: &str = "3.11.7";
 pub const PRODUCT_NAME: &str = "FM Aero Code 2";
 
 /// Hard cap on decompressed payload size (512 MiB).
