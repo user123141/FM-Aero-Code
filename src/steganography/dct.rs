@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! 8x8 DCT and inverse DCT, direct formula (no FFT).
 //! For 512x512 images (4096 blocks) this runs in a few milliseconds.
 

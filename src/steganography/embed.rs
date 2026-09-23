@@ -1,17 +1,31 @@
-//! LSB DCT steganography (v3.8.0).
-//! Embeds bits in the LSB of 11 mid-frequency DCT coefficients per
-//! 8x8 block. Bit-perfect through PNG save/reload. Invisible in practice:
-//! each pixel changes by at most +-1.
+//! Pixel-LSB steganography (v3.8.2).
+//!
+//! Embeds bits directly into the LSB of R/G/B channels of a carrier photo.
+//! Each pixel carries 3 bits (one per channel), change per channel is <=1.
+//! Completely invisible to the eye, bit-perfect through PNG save/reload.
+//!
+//! Rationale: DCT-based LSB on mid-frequency coefficients is fragile -
+//! those coefficients are near zero in natural images, and after
+//! IDCT->round->DCT the LSB flips randomly. Pixel-domain LSB is stable:
+//!   p_new = (p & 0xFE) | bit
+//! round-trips through PNG exactly.
+//!
+//! Capacity: W * H * 3 / 8 bytes (minus header + FEC overhead).
+//!   342x584 -> ~74 KB
+//!   512x512 -> ~98 KB
+//!   1024x1024 -> ~392 KB
+//!
+//! NOT robust to JPEG (JPEG quantizes LSBs). For JPEG-robust stego,
+//! use Robust mode (DCT-QIM, in development).
 
 use anyhow::{anyhow, Result};
 use image::{DynamicImage, RgbImage};
 
 use crate::crypto::{CipherKind, content_hash_8};
 use crate::fec;
-use crate::steganography::dct::{dct8x8, idct8x8, BLOCK_AREA, EMBED_IDX_LSB, LSB_BITS_PER_BLOCK};
 use crate::steganography::STEGO_MAGIC;
 
-const MIN_SIDE: u32 = 64;
+const MIN_SIDE: u32 = 16;
 
 #[derive(Debug, Clone)]
 pub struct StegoOptions {
@@ -35,24 +49,12 @@ pub struct StegoOutcome {
     pub content_hash: String,
 }
 
+/// Payload capacity in bytes for a WxH carrier image.
 pub fn capacity_bytes(w: u32, h: u32) -> usize {
-    let bx = w / 8;
-    let by = h / 8;
-    let blocks = (bx as usize) * (by as usize);
-    let bits = blocks * LSB_BITS_PER_BLOCK;
-    let raw = bits / 8;
+    let total_bits = (w as usize) * (h as usize) * 3;
+    let raw = total_bits / 8;
     let after_header = raw.saturating_sub(17);
     (after_header * 223) / 255
-}
-
-fn set_lsb(c: f32, bit: u8) -> f32 {
-    let q = c.round() as i32;
-    let q2 = (q & !1) | (bit as i32 & 1);
-    q2 as f32
-}
-
-fn get_lsb(c: f32) -> u8 {
-    ((c.round() as i32) & 1) as u8
 }
 
 fn build_stream(payload: &[u8], opts: &StegoOptions) -> Result<(Vec<u8>, CipherKind)> {
@@ -89,9 +91,10 @@ pub fn embed(carrier: &DynamicImage, payload: &[u8], opts: &StegoOptions) -> Res
 
     let (stream, cipher) = build_stream(payload, opts)?;
     if stream.len() > cap {
-        return Err(anyhow!("stream {} B > capacity {} B", stream.len(), cap));
+        return Err(anyhow!("stream {} B > capacity {} B (FEC overhead)", stream.len(), cap));
     }
 
+    // Flatten stream into bits (MSB first per byte)
     let mut bits: Vec<u8> = Vec::with_capacity(stream.len() * 8);
     for &b in &stream {
         for k in (0..8).rev() {
@@ -99,85 +102,22 @@ pub fn embed(carrier: &DynamicImage, payload: &[u8], opts: &StegoOptions) -> Res
         }
     }
 
-    let bx = (w / 8) as usize;
-    let by = (h / 8) as usize;
-    let mut bit_i = 0usize;
-
-    'outer: for byi in 0..by {
-        for bxi in 0..bx {
-            if bit_i >= bits.len() { break 'outer; }
-            let x0 = (bxi * 8) as u32;
-            let y0 = (byi * 8) as u32;
-
-            let mut block = [0.0f32; BLOCK_AREA];
-            for yy in 0..8 {
-                for xx in 0..8 {
-                    let px = rgb.get_pixel(x0 + xx as u32, y0 + yy as u32);
-                    block[yy * 8 + xx] = px.0[0] as f32;
-                }
-            }
-
-            let mut dct = [0.0f32; BLOCK_AREA];
-            dct8x8(&block, &mut dct);
-
-            let bit_start = bit_i;
-            for &idx in EMBED_IDX_LSB.iter() {
-                if bit_i >= bits.len() { break; }
-                dct[idx] = set_lsb(dct[idx], bits[bit_i]);
-                bit_i += 1;
-            }
-            let bit_end = bit_i;
-
-            let mut sp = [0.0f32; BLOCK_AREA];
-            idct8x8(&dct, &mut sp);
-            let mut sp_i = [0u8; BLOCK_AREA];
-            for i in 0..BLOCK_AREA {
-                sp_i[i] = sp[i].round().clamp(0.0, 255.0) as u8;
-            }
-
-            let mut sp_f = [0.0f32; BLOCK_AREA];
-            for i in 0..BLOCK_AREA { sp_f[i] = sp_i[i] as f32; }
-            let mut verify = [0.0f32; BLOCK_AREA];
-            dct8x8(&sp_f, &mut verify);
-
-            let mut corrected = false;
-            for (k, &idx) in EMBED_IDX_LSB.iter().enumerate() {
-                let bi = bit_start + k;
-                if bi >= bit_end { break; }
-                let want = bits[bi];
-                if get_lsb(verify[idx]) != want {
-                    let v = verify[idx];
-                    let q = v.round() as i32;
-                    let target = if (q & 1) as u8 == want {
-                        q
-                    } else if want == 1 {
-                        q + 1
-                    } else {
-                        q - 1
-                    };
-                    dct[idx] = target as f32;
-                    corrected = true;
-                }
-            }
-
-            if corrected {
-                idct8x8(&dct, &mut sp);
-                for i in 0..BLOCK_AREA {
-                    sp_i[i] = sp[i].round().clamp(0.0, 255.0) as u8;
-                }
-            }
-
-            for yy in 0..8 {
-                for xx in 0..8 {
-                    let px = rgb.get_pixel_mut(x0 + xx as u32, y0 + yy as u32);
-                    px.0[0] = sp_i[yy * 8 + xx];
-                }
-            }
-        }
+    let total_channels = (w as usize) * (h as usize) * 3;
+    if bits.len() > total_channels {
+        return Err(anyhow!("not enough channel capacity"));
     }
 
-    if bit_i < bits.len() {
-        return Err(anyhow!("carrier ran out: {} of {} bits", bit_i, bits.len()));
+    // Write LSBs: iterate pixels row-major, each pixel 3 channels (R,G,B)
+    let mut bit_i = 0usize;
+    'outer: for y in 0..h {
+        for x in 0..w {
+            let px = rgb.get_pixel_mut(x, y);
+            for ch in 0..3 {
+                if bit_i >= bits.len() { break 'outer; }
+                px.0[ch] = (px.0[ch] & 0xFE) | bits[bit_i];
+                bit_i += 1;
+            }
+        }
     }
 
     Ok(StegoOutcome {
@@ -196,25 +136,15 @@ pub fn extract(stego: &DynamicImage, password: &str) -> Result<Vec<u8>> {
     if w < MIN_SIDE || h < MIN_SIDE {
         return Err(anyhow!("image too small"));
     }
-    let bx = (w / 8) as usize;
-    let by = (h / 8) as usize;
-    let mut bits: Vec<u8> = Vec::with_capacity(bx * by * LSB_BITS_PER_BLOCK);
 
-    for byi in 0..by {
-        for bxi in 0..bx {
-            let x0 = (bxi * 8) as u32;
-            let y0 = (byi * 8) as u32;
-            let mut block = [0.0f32; BLOCK_AREA];
-            for yy in 0..8 {
-                for xx in 0..8 {
-                    let px = rgb.get_pixel(x0 + xx as u32, y0 + yy as u32);
-                    block[yy * 8 + xx] = px.0[0] as f32;
-                }
-            }
-            let mut dct = [0.0f32; BLOCK_AREA];
-            dct8x8(&block, &mut dct);
-            for &idx in EMBED_IDX_LSB.iter() {
-                bits.push(get_lsb(dct[idx]));
+    let total_channels = (w as usize) * (h as usize) * 3;
+    let mut bits: Vec<u8> = Vec::with_capacity(total_channels);
+
+    for y in 0..h {
+        for x in 0..w {
+            let px = rgb.get_pixel(x, y);
+            for ch in 0..3 {
+                bits.push(px.0[ch] & 1);
             }
         }
     }
@@ -243,13 +173,13 @@ pub fn extract(stego: &DynamicImage, password: &str) -> Result<Vec<u8>> {
     hash.copy_from_slice(&raw[9..17]);
 
     if 17 + fec_len > raw.len() {
-        return Err(anyhow!("stream truncated"));
+        return Err(anyhow!("stream truncated: need {}, have {}", 17 + fec_len, raw.len()));
     }
     let fec_bytes = &raw[17..17 + fec_len];
     let enc = fec::decode(fec_bytes).map_err(|e| anyhow!("fec: {}", e))?;
 
     let payload = if flags & 1 != 0 {
-        if password.is_empty() { return Err(anyhow!("password required")); }
+        if password.is_empty() { return Err(anyhow!("password required for extraction")); }
         crate::crypto::seal::open(password, &enc)
             .map_err(|_| anyhow!("wrong password or corrupted"))?
     } else {
