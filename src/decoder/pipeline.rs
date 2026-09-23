@@ -30,6 +30,7 @@ pub struct DecodeOutcome {
     pub pages_received: usize,
     pub pages_total: usize,
     pub app_signature_ok: Option<bool>,
+    pub official_build: bool,
 }
 
 fn recover_stream(luma: &GrayImage) -> Result<Vec<u8>> {
@@ -130,12 +131,14 @@ fn outcome(h: AeroHeader, s: Vec<u8>, pw: &str, vk: Option<&VerifyingKey>, recov
     } else {
         None
     };
+    let official_build = h.flags & crate::types::HEADER_FLAG_OFFICIAL_BUILD != 0;
     Ok(DecodeOutcome {
         payload, header: h, sha256: sha, hash_ok, signature_ok, hmac_ok,
         original_filename, created_at: created,
         recovered_from_parity: recovered,
         pages_received: recv, pages_total: total,
         app_signature_ok,
+        official_build,
     })
 }
 
@@ -360,12 +363,14 @@ pub fn try_multi_recipient(
     let hash_ok = constant_time_eq(&content_hash_8(&up), &h.content_hash);
     let sha = sha256_short(&up);
     let created = { let s = h.created_at_str(); if s == "unknown" { None } else { Some(s) } };
+    let official_build = h.flags & crate::types::HEADER_FLAG_OFFICIAL_BUILD != 0;
     Ok(DecodeOutcome {
         payload: up, header: h, sha256: sha, hash_ok,
         signature_ok: true, hmac_ok: true,
         original_filename: fname, created_at: created,
         recovered_from_parity: false, pages_received: 1, pages_total: 1,
         app_signature_ok: None,
+        official_build: false,
     })
 }
 

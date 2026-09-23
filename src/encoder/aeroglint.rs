@@ -119,7 +119,14 @@ pub fn inject_stars(matrix: &mut [Complex32], size: usize, density: u16) {
         if xi < 0 || yi < 0 || xi >= size as isize || yi >= size as isize { continue; }
         let xu = xi as usize;
         let yu = yi as usize;
-        let amp = 30.0 + (rng.next() as f32 / u64::MAX as f32) * 12.0;
+        let tier = rng.next() as f32 / u64::MAX as f32;
+        let amp = if tier < 0.75 {
+            18.0 + (rng.next() as f32 / u64::MAX as f32) * 10.0
+        } else if tier < 0.95 {
+            45.0 + (rng.next() as f32 / u64::MAX as f32) * 15.0
+        } else {
+            90.0 + (rng.next() as f32 / u64::MAX as f32) * 40.0
+        };
         let ph = (rng.next() as f32 / u64::MAX as f32) * std::f32::consts::TAU;
         let v = Complex32::new(amp * ph.cos(), amp * ph.sin());
         let mx = (size - xu) % size;

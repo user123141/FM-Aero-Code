@@ -1,6 +1,6 @@
 [package]
 name = "fm_aero_code_2"
-version = "3.11.7"
+version = "3.11.12"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]
@@ -52,6 +52,10 @@ path = "src/bin/fm_selftest.rs"
 [[bin]]
 name = "fm_sign"
 path = "src/bin/fm_sign.rs"
+
+[[bin]]
+name = "fm_verify"
+path = "src/bin/fm_verify.rs"
 
 [dependencies]
 ureq = { version = "2", default-features = false, features = ["tls"] }

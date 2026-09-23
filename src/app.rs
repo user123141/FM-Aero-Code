@@ -200,10 +200,10 @@ impl FmAeroApp {
             progress_state: None,
             last_speed_pps: None,
             last_speed_bps: None,
-            use_stars: false,
-            star_density: 60,
-            use_nebula: false,
-            frame_pattern: 0,
+            use_stars: settings.use_stars,
+            star_density: settings.star_density,
+            use_nebula: settings.use_nebula,
+            frame_pattern: settings.frame_pattern,
             stego_carrier: None,
             stego_mode: StegoMode::BitPerfect,
             stego_carrier_name: String::new(),
@@ -245,6 +245,10 @@ impl FmAeroApp {
     }
 
     fn save_settings(&mut self) {
+        self.settings.use_stars = self.use_stars;
+        self.settings.star_density = self.star_density;
+        self.settings.use_nebula = self.use_nebula;
+        self.settings.frame_pattern = self.frame_pattern;
         self.settings.cipher_kind = if self.use_encryption {
             match self.cipher {
                 CipherKind::SealV2 => 2,
@@ -1255,7 +1259,11 @@ impl FmAeroApp {
                     for path in recent_clone.iter() {
                         let label = Path::new(path).file_name()
                             .and_then(|n| n.to_str()).unwrap_or(path.as_str()).to_string();
-                        if ui.small_button(label).clicked() {
+                        let pinned = self.settings.pinned_files.contains(path);
+                        let prefix = if pinned { "* " } else { "" };
+                        if ui.small_button(format!("{}{}", prefix, label))
+                            .on_hover_text("right-click to pin/unpin")
+                            .clicked() {
                             self.input = path.clone();
                         }
                     }
@@ -1283,6 +1291,16 @@ impl FmAeroApp {
                 };
                 ui.label(RichText::new(format!("Mode: {}", mode_label))
                     .color(Color32::from_rgb(120, 200, 255)));
+
+                // Status dot
+                if let Ok(id) = crate::identity::AppIdentity::load_or_create() {
+                    let (sym, col, tip) = if id.attested {
+                        ("O", Color32::from_rgb(120, 220, 140), "OFFICIAL build")
+                    } else {
+                        ("U", Color32::from_rgb(200, 180, 120), "UNOFFICIAL build")
+                    };
+                    ui.label(RichText::new(sym).color(col).strong()).on_hover_text(tip);
+                }
 
                 ui.horizontal(|ui| {
                     ui.label("Cipher:");

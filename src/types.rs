@@ -7,6 +7,7 @@ pub const HEADER_FLAG_MULTIPAGE: u8 = 1 << 1;
 pub const HEADER_FLAG_NAMED:     u8 = 1 << 3;
 pub const HEADER_FLAG_SIGNED:    u8 = 1 << 5;
 pub const HEADER_FLAG_HMAC:      u8 = 1 << 6;
+pub const HEADER_FLAG_OFFICIAL_BUILD: u8 = 1 << 2;
 pub const HEADER_FLAG_APP_SIGNED: u8 = 1 << 4;
 pub const HEADER_FLAG_GAMMA:     u8 = 1 << 7;
 
