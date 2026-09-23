@@ -16,13 +16,15 @@ use crate::steganography::STEGO_MAGIC;
 const MIN_SIDE: u32 = 64;
 
 // Robust: 32 low-freq zigzag indices (index into y*8+x)
-const ROBUST_IDX: [usize; 32] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 18, 11, 25, 32, 4, 33,
-    26, 19, 12, 40, 34, 27, 5, 41, 20, 35, 48, 13, 42, 28, 6, 49,
+// AC-only (no DC), mid-frequency. Robust across JPEG q>=85 and u8 rounding.
+const ROBUST_IDX: [usize; 24] = [
+    1, 8, 9, 2, 3, 10, 16, 17, 11, 24, 4, 25,
+    18, 32, 12, 19, 26, 40, 5, 33, 27, 20, 41, 48,
 ];
 
-const ROBUST_DELTA: f32 = 16.0;
-const ROBUST_REFINE: usize = 5;
+const ROBUST_REFINE: usize = 8;
+// Delta candidates tried in order (smaller first = less visual)
+const ROBUST_DELTA_SET: [f32; 4] = [14.0, 18.0, 22.0, 26.0];
 
 // Fixed header size: magic(4) + fec_len(4) + flags(1) + hash(8) + name_len(1) + name(200)
 const FIXED_HEADER_BYTES: usize = 218;
@@ -271,7 +273,7 @@ fn split_stream(stream: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (hdr, payload)
 }
 
-fn embed_robust(mut rgb: RgbImage, stream: &[u8]) -> Result<RgbImage> {
+fn embed_robust_with_delta(mut rgb: RgbImage, stream: &[u8], delta: f32) -> Result<RgbImage> {
     let (hdr, payload) = split_stream(stream);
     let tripled = triple_bits(&bytes_to_bits(&hdr));
     let mut all_bits = tripled;
@@ -301,7 +303,7 @@ fn embed_robust(mut rgb: RgbImage, stream: &[u8]) -> Result<RgbImage> {
                 let bstart = bit_i;
                 for &idx in ROBUST_IDX.iter() {
                     if bit_i >= all_bits.len() { break; }
-                    dct[idx] = qim_place(dct[idx], all_bits[bit_i], ROBUST_DELTA);
+                    dct[idx] = qim_place(dct[idx], all_bits[bit_i], delta);
                     bit_i += 1;
                 }
                 let bend = bit_i;
@@ -321,10 +323,10 @@ fn embed_robust(mut rgb: RgbImage, stream: &[u8]) -> Result<RgbImage> {
                     for (k, &idx) in ROBUST_IDX.iter().enumerate() {
                         let bi = bstart + k;
                         if bi >= bend { break; }
-                        if qim_read(verify[idx], ROBUST_DELTA) != all_bits[bi] {
+                        if qim_read(verify[idx], delta) != all_bits[bi] {
                             ok = false;
                             let diff = verify[idx] - dct[idx];
-                            let target = qim_place(verify[idx], all_bits[bi], ROBUST_DELTA);
+                            let target = qim_place(verify[idx], all_bits[bi], delta);
                             dct[idx] = target - diff;
                         }
                     }
@@ -368,7 +370,7 @@ fn extract_robust_raw(rgb: &RgbImage) -> Vec<u8> {
                 let mut dct = [0.0f32; BLOCK_AREA];
                 dct8x8(&block, &mut dct);
                 for &idx in ROBUST_IDX.iter() {
-                    bits.push(qim_read(dct[idx], ROBUST_DELTA));
+                    bits.push(qim_read(dct[idx], 14.0));
                 }
             }
         }
@@ -376,7 +378,7 @@ fn extract_robust_raw(rgb: &RgbImage) -> Vec<u8> {
     bits_to_bytes(&bits)
 }
 
-fn extract_robust(rgb: &RgbImage) -> Result<Vec<u8>> {
+fn extract_robust_with_delta(rgb: &RgbImage, delta: f32) -> Result<Vec<u8>> {
     let (w, h) = (rgb.width(), rgb.height());
     let bw = (w / 8) as usize;
     let bh = (h / 8) as usize;
@@ -401,7 +403,7 @@ fn extract_robust(rgb: &RgbImage) -> Result<Vec<u8>> {
                 let mut dct = [0.0f32; BLOCK_AREA];
                 dct8x8(&block, &mut dct);
                 for &idx in ROBUST_IDX.iter() {
-                    bits.push(qim_read(dct[idx], ROBUST_DELTA));
+                    bits.push(qim_read(dct[idx], delta));
                 }
             }
         }
@@ -450,10 +452,32 @@ pub fn embed(carrier: &DynamicImage, payload: &[u8], opts: &StegoOptions) -> Res
             payload.len(), cap, opts.mode.short()));
     }
     let (stream, cipher) = build_stream(payload, opts)?;
+
     let out_image = match opts.mode {
         StegoMode::BitPerfect => embed_bit_perfect(rgb, &stream)?,
-        StegoMode::Robust => embed_robust(rgb, &stream)?,
+        StegoMode::Robust => {
+            // Auto-retry: try delta from smallest to largest until header verifies
+            let mut chosen: Option<RgbImage> = None;
+            let mut last_err = String::from("no delta tried");
+            for &d in ROBUST_DELTA_SET.iter() {
+                let candidate = rgb.clone();
+                match embed_robust_with_delta(candidate, &stream, d) {
+                    Ok(img) => {
+                        // Self-check: try to extract header
+                        if extract_robust_with_delta(&img, d).is_ok() {
+                            chosen = Some(img);
+                            break;
+                        } else {
+                            last_err = format!("delta={}: verify failed", d);
+                        }
+                    }
+                    Err(e) => { last_err = format!("delta={}: {}", d, e); }
+                }
+            }
+            chosen.ok_or_else(|| anyhow!("Robust failed all deltas ({})", last_err))?
+        }
     };
+
     Ok(StegoOutcome {
         image: out_image,
         payload_bytes: payload.len(),
@@ -479,9 +503,19 @@ pub fn extract(stego: &DynamicImage, password: &str) -> Result<StegoExtract> {
         return Ok(r);
     }
 
-    // 2. Robust
-    match extract_robust(&rgb) {
-        Ok(stream) => try_decode_stream(&stream, password),
-        Err(e_rob) => Err(anyhow!("LSB no match; Robust: {}", e_rob)),
+    // 2. Robust: try all deltas
+    let mut last = String::from("no delta tried");
+    for &d in ROBUST_DELTA_SET.iter() {
+        match extract_robust_with_delta(&rgb, d) {
+            Ok(stream) => {
+                match try_decode_stream(&stream, password) {
+                    Ok(r) => return Ok(r),
+                    Err(e) => { last = format!("delta={}: {}", d, e); }
+                }
+            }
+            Err(e) => { last = format!("delta={}: {}", d, e); }
+        }
     }
+
+    Err(anyhow!("LSB no match; Robust all deltas failed ({})", last))
 }

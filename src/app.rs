@@ -123,6 +123,8 @@ pub struct FmAeroApp {
     stego_text: String,
     stego_last_msg: String,
     stego_decoded: Option<(String, String, usize, String)>,
+    stego_decoded_preview: Option<egui::TextureHandle>,
+    stego_decoded_preview_dirty: bool,
     stego_preview_tex: Option<egui::TextureHandle>,
     stego_carrier_tex: Option<egui::TextureHandle>,
     stego_preview_dirty: bool,
@@ -202,6 +204,8 @@ impl FmAeroApp {
             stego_text: String::new(),
             stego_last_msg: String::new(),
             stego_decoded: None,
+            stego_decoded_preview: None,
+            stego_decoded_preview_dirty: false,
             stego_preview_tex: None,
             stego_carrier_tex: None,
             stego_preview_dirty: false,
@@ -668,6 +672,7 @@ impl FmAeroApp {
                         r.payload.len(), elapsed, kind.label(), r.cipher.label(), r.content_hash);
                     self.push(msg.clone());
                     self.stego_last_msg = msg;
+                    self.stego_decoded_preview_dirty = true;
                     self.stego_decoded = Some((
                         out_name.clone(),
                         kind.label().to_string(),
@@ -819,7 +824,20 @@ impl FmAeroApp {
             ui.add_space(6.0);
             ui.separator();
             ui.heading("Options");
-            ui.checkbox(&mut self.use_encryption, "Encrypt (uses password from Encryption panel)");
+            ui.checkbox(&mut self.use_encryption, "Encrypt payload (AeroSeal v1)");
+            if self.use_encryption {
+                ui.horizontal(|ui| {
+                    ui.label("Password:");
+                    ui.add(egui::TextEdit::singleline(&mut self.password)
+                        .password(true)
+                        .desired_width(ui.available_width() - 60.0)
+                        .hint_text("required for extract"));
+                });
+                if self.password.is_empty() {
+                    ui.colored_label(Color32::from_rgb(255, 200, 100),
+                        RichText::new("Enter password or embed will fail").small());
+                }
+            }
 
             if let Some(c) = self.stego_carrier.as_ref() {
                 if let Ok(img) = image::load_from_memory(c) {
@@ -986,15 +1004,70 @@ impl FmAeroApp {
             });
         });
 
-        if let Some((name, kind, size, sha)) = self.stego_decoded.as_ref() {
+        if let Some((name, kind, size, sha)) = self.stego_decoded.clone() {
             ui.add_space(10.0);
             ui.separator();
-            ui.label(RichText::new("Decoded payload").strong());
-            ui.label(format!("Name: {}", name));
-            ui.label(format!("Type: {}", kind));
-            ui.label(format!("Size: {} B", size));
-            let sha_short = if sha.len() >= 16 { &sha[..16] } else { sha };
-            ui.label(RichText::new(format!("SHA: {}", sha_short)).weak());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Decoded payload").strong());
+                ui.label(RichText::new(format!("[{}]", kind))
+                    .color(Color32::from_rgb(120, 200, 255)).strong());
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Name:").weak());
+                ui.label(RichText::new(&name).strong());
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Size:").weak());
+                let human = crate::types::human_bytes(size);
+                ui.label(RichText::new(human).strong());
+            });
+            let sha_short = if sha.len() >= 16 { &sha[..16] } else { &sha };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("SHA:").weak());
+                ui.label(RichText::new(sha_short).weak().monospace());
+            });
+
+            // Preview based on kind
+            if let Some((bytes, _)) = self.stego_output.as_ref() {
+                match kind.as_str() {
+                    "Image" => {
+                        if self.stego_decoded_preview_dirty {
+                            if let Ok(img) = image::load_from_memory(bytes) {
+                                let rgba = img.to_rgba8();
+                                let (w, h) = (rgba.width(), rgba.height());
+                                let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                    [w as usize, h as usize], rgba.as_raw());
+                                self.stego_decoded_preview = Some(ui.ctx().load_texture(
+                                    "stego_decoded_prev", ci, egui::TextureOptions::LINEAR));
+                                self.stego_decoded_preview_dirty = false;
+                            }
+                        }
+                        if let Some(tex) = self.stego_decoded_preview.as_ref() {
+                            ui.add_space(6.0);
+                            let avail = ui.available_width().min(360.0);
+                            ui.add(egui::Image::new((tex.id(), egui::vec2(avail, avail * 0.7)))
+                                .maintain_aspect_ratio(true));
+                        }
+                    }
+                    "Text" => {
+                        if let Ok(text) = String::from_utf8(bytes.clone()) {
+                            if text.len() <= 4000 {
+                                ui.add_space(4.0);
+                                let mut preview = text.clone();
+                                if preview.len() > 500 {
+                                    preview.truncate(500);
+                                    preview.push_str("...");
+                                }
+                                ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                                    ui.add(egui::Label::new(
+                                        RichText::new(preview).monospace()).wrap_mode(egui::TextWrapMode::Wrap));
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
 
         if !self.stego_last_msg.is_empty() {
