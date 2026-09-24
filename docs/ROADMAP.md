@@ -9,6 +9,8 @@
 - v3.12-v3.13: Sauvola, docs
 - v3.14: web mode toggle, GUI multi-sig (in-memory), WASM CI fix, .gitattributes
 - v3.15.0: **Watson masking, ZKP (Schnorr NIZK), OTS upgrade**
+- v3.16.0: **Audio stego (MDCT-QIM + BitPerfect LSB), ZKP hotfix (scalar_from_seed)**
+- v3.16.1: **Audio hotfixes вЂ” WavFile derives, embed/extract early-exit, OLA correctness, fm_audio verify**
 
 ## Next
 

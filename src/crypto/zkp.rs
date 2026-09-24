@@ -15,7 +15,7 @@
 //!     c = SHA512(P || R || file_hash) mod L
 //!     check z*G == R + c*P
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -95,15 +95,18 @@ pub fn verify(proof: &ZkProof, pk: &[u8; 32], file_hash: &[u8]) -> bool {
 }
 
 fn scalar_from_seed(seed: &[u8; 32]) -> Scalar {
-    // Derive same scalar that ed25519-dalek uses internally
+    // Ed25519 scalar = clamp(SHA512(seed)[0..32]) interpreted as LE integer.
+    // CRITICAL: we must use ONLY the first 32 bytes, not the full 64-byte wide
+    // reduction. from_bytes_mod_order_wide would fold the 64-byte prefix back
+    // into the scalar (N = low + high*2^256), breaking s*G == P.
     let mut h = Sha512::new();
     h.update(seed);
     let digest = h.finalize();
-    let mut wide = [0u8; 64];
-    wide.copy_from_slice(&digest);
-    // Clamping (as in Ed25519)
-    wide[0] &= 248;
-    wide[31] &= 127;
-    wide[31] |= 64;
-    Scalar::from_bytes_mod_order_wide(&wide)
+    let mut scalar_bytes = [0u8; 32];
+    scalar_bytes.copy_from_slice(&digest[..32]);
+    // Ed25519 clamping
+    scalar_bytes[0]  &= 248;
+    scalar_bytes[31] &= 127;
+    scalar_bytes[31] |= 64;
+    Scalar::from_bytes_mod_order(scalar_bytes)
 }

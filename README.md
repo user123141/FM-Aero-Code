@@ -31,6 +31,7 @@ Try it: [user123141.github.io/FM-Aero-Code](https://user123141.github.io/FM-Aero
 | fm_selftest | Round-trip tests |
 | fm_batch | Batch processing |
 | fm_keygen | Key generation |
+| **fm_audio** | **Audio stego: MDCT-QIM (MP3-safe) + BitPerfect LSB** |
 
 ## Stego modes
 

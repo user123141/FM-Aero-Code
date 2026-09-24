@@ -84,6 +84,27 @@ Once Bitcoin-anchored: proof verifiable forever.
     fm_status [--trust|--identity|--export-root|--export-root-qr <png>|--import-root <hex>]
     fm_sign list|add|verify|tsa|ots|ots-upgrade|zkp-prove|zkp-verify <file>
 
+## Audio steganography (fm_audio)
+
+Hide payload inside a WAV. Two modes:
+
+| Mode | Survives | Capacity (3 min, 44.1kHz) |
+|---|---|---|
+| Robust (MDCT-QIM) | MP3 320, AAC 256, Opus 160 | ~25 KB |
+| BitPerfect (LSB)  | WAV / FLAC only              | ~500 KB |
+
+Workflow:
+    fm_audio capacity song.wav
+    fm_audio embed    song.wav secret.bin out.wav --password hunter2 --author "Alice"
+    # (encode out.wav to MP3 320 - the payload survives)
+    fm_audio extract  out.wav recovered.bin --password hunter2
+
+Attestation (Ed25519 sig of metadata):
+    fm_audio keygen                                  # get seed + pubkey
+    fm_audio embed song.wav secret.bin out.wav --sign <hex64>
+
+Inspect:
+    fm_audio inspect song.wav      # duration, channels, bit depth
 ## FAQ
 
 Q: "Unsigned" decoded?
