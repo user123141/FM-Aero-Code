@@ -364,3 +364,122 @@ pub fn render_photo_lowfreq(matrix: &mut [Complex32], size: usize, photo: &GrayI
         }
     }
 }
+
+// ============================================================
+// Progressive layout (v3.18.0)
+// ============================================================
+
+/// Cells sorted by radius (center-out). Lower index = closer to DC =
+/// more robust against blur / low-pass filtering.
+pub fn data_cells_priority(size: usize) -> Vec<(usize, usize)> {
+    let mut cells = data_cells(size);
+    let half = size as i32 / 2;
+    cells.sort_by_key(|&(x, y)| {
+        let fx = (x as i32 - half).abs();
+        let fy = (y as i32 - half).abs();
+        // Prefer cells close to center; break ties by (fx+fy)
+        (fx.max(fy) as u64) << 32 | (fx + fy) as u64
+    });
+    cells
+}
+
+/// Encode with progressive layout:
+///   cells[0..SHORT_HEADER_CELLS] : short header, RS(48,32)-protected,
+///                                  QPSK, no permute
+///   cells[SHORT_HEADER_CELLS..]  : permuted stream, QPSK
+pub fn encode_stream_progressive(
+    stream: &[u8],
+    short_header: &crate::types::ShortHeader,
+    _photo: Option<&GrayImage>,
+    mask: bool,
+    star_density: u16,
+) -> Result<EncodedGlint> {
+    use crate::types::{SHORT_HEADER_LEN, SHORT_HEADER_CELLS, SHORT_HEADER_RS_LEN};
+    let size = AEROGLINT_GRID;
+    let cells = data_cells_priority(size);
+    if cells.len() < SHORT_HEADER_CELLS {
+        return Err(anyhow!("not enough cells for short header"));
+    }
+    let payload_capacity = (cells.len() - SHORT_HEADER_CELLS) * 2 / 8;
+    if stream.len() > payload_capacity {
+        return Err(anyhow!(
+            "stream {} > progressive payload capacity {}",
+            stream.len(), payload_capacity
+        ));
+    }
+
+    let mut matrix = vec![Complex32::new(0.0, 0.0); size * size];
+
+    // Pilots
+    let pilots = pilot_positions(size);
+    for i in 0..4 {
+        let (px, py) = pilots[i];
+        set_hermitian(&mut matrix, size, px, py, PILOT_VALUES[i]);
+    }
+
+    // ----- short header -----
+    let sh_bytes = short_header.to_bytes();
+    debug_assert_eq!(sh_bytes.len(), SHORT_HEADER_LEN);
+    let enc = reed_solomon::Encoder::new(SHORT_HEADER_RS_LEN - SHORT_HEADER_LEN);
+    let coded = enc.encode(&sh_bytes);
+    let mut sh_stream = Vec::with_capacity(SHORT_HEADER_RS_LEN);
+    sh_stream.extend_from_slice(coded.data());
+    sh_stream.extend_from_slice(coded.ecc());
+    debug_assert_eq!(sh_stream.len(), SHORT_HEADER_RS_LEN);
+
+    // Place short header bits directly into first cells (no permute)
+    for (i, &(x, y)) in cells.iter().take(SHORT_HEADER_CELLS).enumerate() {
+        let b1 = (sh_stream[i / 4] >> (7 - ((i * 2) % 8))) & 1;
+        let b2 = (sh_stream[i / 4] >> (7 - ((i * 2 + 1) % 8))) & 1;
+        let re = if b1 == 1 { 1.0 } else { -1.0 };
+        let im = if b2 == 1 { 1.0 } else { -1.0 };
+        set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
+    }
+
+    // ----- payload (permuted) -----
+    let total_bits = stream.len() * 8;
+    let mut bits: Vec<u8> = Vec::with_capacity(total_bits);
+    for i in 0..total_bits {
+        let byte = stream[i / 8];
+        let bit = 7 - (i % 8);
+        bits.push((byte >> bit) & 1);
+    }
+    let pay_cells = &cells[SHORT_HEADER_CELLS..];
+    let mut perm: Vec<usize> = (0..pay_cells.len() * 2).collect();
+    let mut rng = SplitMix64::new(interleave_seed());
+    for i in (1..perm.len()).rev() {
+        let j = (rng.next() as usize) % (i + 1);
+        perm.swap(i, j);
+    }
+    for (cell_idx, &(x, y)) in pay_cells.iter().enumerate() {
+        let a = cell_idx * 2;
+        let b = cell_idx * 2 + 1;
+        if b >= perm.len() { break; }
+        let src_a = perm[a];
+        let src_b = perm[b];
+        let b1 = if src_a < bits.len() { bits[src_a] } else { 0 };
+        let b2 = if src_b < bits.len() { bits[src_b] } else { 0 };
+        let re = if b1 == 1 { 1.0 } else { -1.0 };
+        let im = if b2 == 1 { 1.0 } else { -1.0 };
+        set_hermitian(&mut matrix, size, x, y, Complex32::new(re, im));
+    }
+
+    if mask { inject_stars(&mut matrix, size, star_density); }
+
+    fft2d(&mut matrix, size, true);
+    let mut mn = f32::INFINITY; let mut mx = f32::NEG_INFINITY;
+    for c in &matrix {
+        let r = c.re;
+        if r < mn { mn = r; } if r > mx { mx = r; }
+    }
+    let range = (mx - mn).max(1e-6);
+    let mut img = GrayImage::new(size as u32, size as u32);
+    for y in 0..size {
+        for x in 0..size {
+            let r = matrix[y * size + x].re;
+            let norm = ((r - mn) / range).clamp(0.0, 1.0);
+            img.put_pixel(x as u32, y as u32, Luma([(norm * 255.0) as u8]));
+        }
+    }
+    Ok(EncodedGlint { image: img, bytes_used: stream.len(), capacity_bytes: payload_capacity })
+}

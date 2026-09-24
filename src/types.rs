@@ -273,3 +273,131 @@ pub fn human_bytes(b: usize) -> String {
         format!("{:.2} {}", x, U[i])
     }
 }
+
+// ============================================================
+// Progressive encoding (v3.18.0)
+// ============================================================
+/// Length of the short header (32 bytes, pre-RS).
+pub const SHORT_HEADER_LEN: usize = 32;
+/// Length after RS(48,32) parity is appended.
+pub const SHORT_HEADER_RS_LEN: usize = 48;
+/// Number of QPSK cells (2 bits each) needed to store SHORT_HEADER_RS_LEN.
+pub const SHORT_HEADER_CELLS: usize = SHORT_HEADER_RS_LEN * 8 / 2;
+
+/// Bit in header byte `mask` that marks progressive layout.
+pub const MASK_PROGRESSIVE: u8 = 0x80;
+
+#[derive(Debug, Clone)]
+pub struct ShortHeader {
+    pub data_type: u8,
+    pub flags: u8,
+    pub original_size: u32,
+    pub payload_size: u32,
+    pub content_hash: [u8; 8],
+    pub cipher: u8,
+    pub page_index: u16,
+    pub page_total: u16,
+}
+
+impl ShortHeader {
+    pub fn from_full(h: &AeroHeader) -> Self {
+        Self {
+            data_type: h.data_type as u8,
+            flags: h.flags,
+            original_size: h.original_size,
+            payload_size: h.payload_size,
+            content_hash: h.content_hash,
+            cipher: h.cipher as u8,
+            page_index: h.page_index,
+            page_total: h.page_total,
+        }
+    }
+
+    /// Encode 32 bytes.
+    /// Layout: magic(3) | ver(1) | dtype(1) | flags(1) | orig_size(4) |
+    ///         payload_size(4) | content_hash(8) | cipher(1) | page_index(2) |
+    ///         page_total(2) | crc(5) = 32
+    pub fn to_bytes(&self) -> [u8; SHORT_HEADER_LEN] {
+        let mut b = [0u8; SHORT_HEADER_LEN];
+        b[0..3].copy_from_slice(&AERO_MAGIC);
+        b[3] = AERO_VERSION;
+        b[4] = self.data_type;
+        b[5] = self.flags;
+        b[6..10].copy_from_slice(&self.original_size.to_le_bytes());
+        b[10..14].copy_from_slice(&self.payload_size.to_le_bytes());
+        b[14..22].copy_from_slice(&self.content_hash);
+        b[22] = self.cipher;
+        b[23..25].copy_from_slice(&self.page_index.to_le_bytes());
+        b[25..27].copy_from_slice(&self.page_total.to_le_bytes());
+        // Simple checksum: FNV-1a over first 27 bytes, spread over 5 bytes
+        let crc = fnv32(&b[..27]);
+        b[27..32].copy_from_slice(&crc.to_le_bytes()[..5]);
+        b
+    }
+
+    pub fn from_bytes(b: &[u8; SHORT_HEADER_LEN]) -> Option<Self> {
+        if &b[0..3] != &AERO_MAGIC { return None; }
+        if b[3] != AERO_VERSION { return None; }
+        let expected = u32::from_le_bytes([b[27], b[28], b[29], b[30]]);
+        let crc = fnv32(&b[..27]);
+        // Compare 4 bytes (5th reserved)
+        if crc != expected { return None; }
+        Some(Self {
+            data_type: b[4],
+            flags: b[5],
+            original_size: u32::from_le_bytes([b[6], b[7], b[8], b[9]]),
+            payload_size: u32::from_le_bytes([b[10], b[11], b[12], b[13]]),
+            content_hash: {
+                let mut h = [0u8; 8];
+                h.copy_from_slice(&b[14..22]);
+                h
+            },
+            cipher: b[22],
+            page_index: u16::from_le_bytes([b[23], b[24]]),
+            page_total: u16::from_le_bytes([b[25], b[26]]),
+        })
+    }
+}
+
+impl ShortHeader {
+    /// Expand to a full 128-byte AeroHeader byte array for API compatibility.
+    /// Fields not in ShortHeader are zeroed.
+    pub fn to_bytes_full_padded(&self) -> Vec<u8> {
+        let mut b = vec![0u8; AERO_HEADER_SIZE];
+        b[0..3].copy_from_slice(&AERO_MAGIC);
+        b[3] = AERO_VERSION;
+        b[4] = self.data_type;
+        b[6] = self.cipher;
+        b[7] = self.flags;
+        b[8..12].copy_from_slice(&self.original_size.to_le_bytes());
+        b[12..16].copy_from_slice(&self.payload_size.to_le_bytes());
+        b[18..20].copy_from_slice(&self.page_index.to_le_bytes());
+        b[20..22].copy_from_slice(&self.page_total.to_le_bytes());
+        b[22..30].copy_from_slice(&self.content_hash);
+        b
+    }
+}
+
+impl AeroHeader {
+    /// All-zero header, used as placeholder in partial decode.
+    pub fn empty() -> Self {
+        Self {
+            data_type: DataType::Raw,
+            compression: CompressionKind::AeroPack,
+            cipher: crate::crypto::CipherKind::None,
+            flags: 0,
+            original_size: 0,
+            payload_size: 0,
+            checksum: 0,
+            page_index: 0,
+            page_total: 0,
+            content_hash: [0u8; 8],
+            signature: [0u8; 64],
+            hmac: [0u8; 16],
+            reserved: [0u8; 4],
+            page_crc: 0,
+            resilience_level: 0,
+            mask: 0,
+        }
+    }
+}

@@ -31,6 +31,10 @@ pub struct DecodeOutcome {
     pub pages_total: usize,
     pub app_signature_ok: Option<bool>,
     pub official_build: bool,
+    /// True when only the short header was decoded.
+    pub partial: bool,
+    /// Short header snapshot when partial=true.
+    pub short_header: Option<crate::types::ShortHeader>,
 }
 
 fn recover_stream(luma: &GrayImage) -> Result<Vec<u8>> {
@@ -139,13 +143,56 @@ fn outcome(h: AeroHeader, s: Vec<u8>, pw: &str, vk: Option<&VerifyingKey>, recov
         recovered_from_parity: recovered,
         pages_received: recv, pages_total: total,
         app_signature_ok,
+        partial: false,
+        short_header: None,
     })
 }
 
 pub fn decode_image(img: &GrayImage, password: &str, vk: Option<&VerifyingKey>) -> Result<DecodeOutcome> {
-    let stream = recover_stream(img)?;
-    let (h, payload, ms) = split_header_payload_ms(&stream)?;
-    outcome(h, payload, password, vk, false, 1, 1, ms)
+    // Standard path
+    if let Ok(stream) = recover_stream(img) {
+        if let Ok((h, payload, ms)) = split_header_payload_ms(&stream) {
+            if h.mask & crate::types::MASK_PROGRESSIVE != 0 {
+                // Progressive marker, but standard recovery worked
+                return outcome(h, payload, password, vk, false, 1, 1, ms);
+            }
+            return outcome(h, payload, password, vk, false, 1, 1, ms);
+        }
+    }
+
+    // Progressive fallback: try short header
+    if let Some(_sh) = crate::decoder::aeroglint::decode_short_header(img) {
+        // Attempt full progressive decode
+        if let Ok((glint, sh2)) = crate::decoder::aeroglint::decode_luma_progressive(img) {
+            if let Ok(fec_stream) = crate::fec::decode(&glint.stream) {
+                if let Ok((h, payload, ms)) = split_header_payload_ms(&fec_stream) {
+                    return outcome(h, payload, password, vk, false, 1, 1, ms);
+                }
+            }
+            // Header decoded but payload too damaged: return partial
+            let sh_h = crate::types::AeroHeader::from_bytes(&sh2.to_bytes_full_padded())
+                .unwrap_or_else(crate::types::AeroHeader::empty);
+            return Ok(DecodeOutcome {
+                payload: Vec::new(),
+                header: sh_h,
+                sha256: hex::encode(sh2.content_hash),
+                hash_ok: false,
+                signature_ok: false,
+                hmac_ok: false,
+                original_filename: String::new(),
+                created_at: None,
+                recovered_from_parity: false,
+                pages_received: 0,
+                pages_total: sh2.page_total as usize,
+                app_signature_ok: None,
+                official_build: false,
+                partial: true,
+                short_header: Some(sh2),
+            });
+        }
+    }
+
+    Err(anyhow!("decode failed (standard + progressive)"))
 }
 
 pub fn decode_from_bytes(data: &[u8], password: &str, vk: Option<&VerifyingKey>) -> Result<DecodeOutcome> {
@@ -370,6 +417,8 @@ pub fn try_multi_recipient(
         recovered_from_parity: false, pages_received: 1, pages_total: 1,
         app_signature_ok: None,
         official_build: false,
+        partial: false,
+        short_header: None,
     })
 }
 

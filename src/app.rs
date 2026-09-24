@@ -183,6 +183,7 @@ pub struct FmAeroApp {
     stego_preview_tex: Option<egui::TextureHandle>,
     stego_carrier_tex: Option<egui::TextureHandle>,
     stego_preview_dirty: bool,
+    use_progressive: bool,
 
     // ---- Audio mode state ----
     audio_carrier: Option<Vec<u8>>,
@@ -296,6 +297,7 @@ impl FmAeroApp {
             stego_preview_tex: None,
             stego_carrier_tex: None,
             stego_preview_dirty: false,
+            use_progressive: false,
             audio_carrier: None,
             audio_carrier_name: String::new(),
             audio_carrier_peaks: None,
@@ -379,6 +381,7 @@ impl FmAeroApp {
         let star_density = self.star_density;
         let use_nebula = self.use_nebula;
         let frame_pattern = self.frame_pattern;
+        let use_progressive = self.use_progressive;
         if !self.input.is_empty() {
             self.settings.add_recent(&self.input);
         }
@@ -416,6 +419,7 @@ impl FmAeroApp {
                 sign_with_app_identity: true,
                 extra_signatures: Vec::new(),
                 tsa_block: None,
+                progressive: use_progressive,
             };
             match encode_payload(&data, &opts) {
                 Ok(r) => {
@@ -1817,7 +1821,7 @@ impl FmAeroApp {
         // Mode toggle at top of left panel
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let w = (ui.available_width() - 8.0) / 3.0;
+            let w = (ui.available_width() - 16.0) / 3.0; // 2 gaps * 8px default spacing
             let ag = ui.add_sized([w, 34.0],
                 egui::SelectableLabel::new(self.mode == Mode::AeroGlint, "AeroGlint"));
             if ag.clicked() { self.mode = Mode::AeroGlint; }
@@ -1967,6 +1971,8 @@ impl FmAeroApp {
                     });
             });
             ui.checkbox(&mut self.border, "Detection border (camera / print)");
+            ui.checkbox(&mut self.use_progressive, "Progressive layout (metadata survives blur)")
+                .on_hover_text("Duplicates the header in low-frequency cells with strong RS parity.\nIf the image is too degraded for a full decode, you still get type / size / hash.");
 
             ui.add_space(6.0);
             ui.label(RichText::new("Soft decorations (visual only)").strong());

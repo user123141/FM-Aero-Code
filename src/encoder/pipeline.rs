@@ -85,6 +85,8 @@ pub struct EncodeOptions {
     pub sign_with_app_identity: bool,
     pub extra_signatures: Vec<crate::multisig::ExtraSignature>,
     pub tsa_block: Option<crate::multisig::MultiSigBlock>,
+    /// Progressive layout: short header in low-freq for partial decode.
+    pub progressive: bool,
 }
 
 impl Default for EncodeOptions {
@@ -114,6 +116,7 @@ impl Default for EncodeOptions {
             sign_with_app_identity: false,
             extra_signatures: Vec::new(),
             tsa_block: None,
+            progressive: false,
         }
     }
 }
@@ -321,9 +324,23 @@ fn encode_glint(
     opts: &EncodeOptions,
     logo: Option<&image::GrayImage>,
 ) -> Result<image::GrayImage> {
+    use crate::types::ShortHeader;
     let with_fec = crate::fec::encode(framed)?;
-    let glint = encode_stream(&with_fec, logo, opts.gamma, opts.mask,
-        opts.star_density, opts.nebula, opts.frame_pattern)?;
+    let glint = if opts.progressive {
+        // Short header extracted from the first 128 bytes of `framed`.
+        if framed.len() < crate::types::AERO_HEADER_SIZE {
+            return Err(anyhow!("progressive: framed too short for header"));
+        }
+        let full = crate::types::AeroHeader::from_bytes(&framed[..crate::types::AERO_HEADER_SIZE])
+            .ok_or_else(|| anyhow!("progressive: bad header in framed"))?;
+        let sh = ShortHeader::from_full(&full);
+        crate::encoder::aeroglint::encode_stream_progressive(
+            &with_fec, &sh, logo, opts.mask, opts.star_density
+        )?
+    } else {
+        encode_stream(&with_fec, logo, opts.gamma, opts.mask,
+            opts.star_density, opts.nebula, opts.frame_pattern)?
+    };
     Ok(if opts.border {
         crate::encoder::aeroglint::wrap_with_border(&glint.image)
     } else {

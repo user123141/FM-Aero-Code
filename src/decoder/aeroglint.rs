@@ -332,3 +332,128 @@ pub fn sauvola_binarize(img: &GrayImage, window: u32, k: f32) -> GrayImage {
     }
     out
 }
+
+// ============================================================
+// Progressive decode (v3.18.0)
+// ============================================================
+
+/// Decode only the short header (metadata) from the low-frequency cells.
+/// Works even when the full payload is too degraded to read.
+pub fn decode_short_header(luma: &GrayImage) -> Option<crate::types::ShortHeader> {
+    use crate::types::{SHORT_HEADER_LEN, SHORT_HEADER_RS_LEN, SHORT_HEADER_CELLS};
+    use crate::encoder::aeroglint::data_cells_priority;
+    let size = AEROGLINT_GRID;
+    let stripped = strip_border(luma);
+    let resized = if stripped.width() != size as u32 || stripped.height() != size as u32 {
+        image::imageops::resize(&stripped, size as u32, size as u32, FilterType::Triangle)
+    } else { stripped };
+    let mut sum = 0.0f64;
+    for p in resized.pixels() { sum += p.0[0] as f64; }
+    let mean = (sum / (size * size) as f64) as f32;
+    let mut matrix: Vec<Complex32> = resized.pixels()
+        .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
+        .collect();
+    fft2d(&mut matrix, size);
+
+    let cells = data_cells_priority(size);
+    if cells.len() < SHORT_HEADER_CELLS { return None; }
+
+    // Extract bits from the first SHORT_HEADER_CELLS cells
+    let mut bits: Vec<u8> = Vec::with_capacity(SHORT_HEADER_CELLS * 2);
+    let noise_floor = median_data_amplitude(&matrix, size);
+    let threshold = noise_floor * 0.4;
+    for &(x, y) in cells.iter().take(SHORT_HEADER_CELLS) {
+        let v = matrix[y * size + x];
+        if v.norm() < threshold {
+            bits.push(0); bits.push(0);
+        } else {
+            bits.push(if v.re > 0.0 { 1 } else { 0 });
+            bits.push(if v.im > 0.0 { 1 } else { 0 });
+        }
+    }
+    // Pack into bytes
+    let mut bytes = Vec::with_capacity(SHORT_HEADER_RS_LEN);
+    for chunk in bits.chunks(8) {
+        if chunk.len() < 8 { break; }
+        let mut b = 0u8;
+        for (i, &bit) in chunk.iter().enumerate() { b |= bit << (7 - i); }
+        bytes.push(b);
+    }
+    if bytes.len() < SHORT_HEADER_RS_LEN { return None; }
+    // RS-correct
+    let mut block = [0u8; 255];
+    let rs_len = SHORT_HEADER_RS_LEN;
+    block[..rs_len].copy_from_slice(&bytes[..rs_len]);
+    let dec = reed_solomon::Decoder::new(rs_len - SHORT_HEADER_LEN);
+    let corrected = dec.correct(&mut block[..rs_len], None).ok()?;
+    let data = corrected.data();
+    if data.len() < SHORT_HEADER_LEN { return None; }
+    let mut sh_bytes = [0u8; SHORT_HEADER_LEN];
+    sh_bytes.copy_from_slice(&data[..SHORT_HEADER_LEN]);
+    crate::types::ShortHeader::from_bytes(&sh_bytes)
+}
+
+/// Full progressive decode: short header first, then payload.
+pub fn decode_luma_progressive(luma: &GrayImage) -> Result<(DecodedGlint, crate::types::ShortHeader)> {
+    use crate::types::{SHORT_HEADER_CELLS};
+    use crate::encoder::aeroglint::data_cells_priority;
+
+    let sh = decode_short_header(luma)
+        .ok_or_else(|| anyhow!("progressive short header not found"))?;
+
+    let size = AEROGLINT_GRID;
+    let stripped = strip_border(luma);
+    let resized = if stripped.width() != size as u32 || stripped.height() != size as u32 {
+        image::imageops::resize(&stripped, size as u32, size as u32, FilterType::Triangle)
+    } else { stripped };
+    let mut sum = 0.0f64;
+    for p in resized.pixels() { sum += p.0[0] as f64; }
+    let mean = (sum / (size * size) as f64) as f32;
+    let mut matrix: Vec<Complex32> = resized.pixels()
+        .map(|p| Complex32::new(p.0[0] as f32 - mean, 0.0))
+        .collect();
+    fft2d(&mut matrix, size);
+
+    let cells = data_cells_priority(size);
+    let pay_cells = &cells[SHORT_HEADER_CELLS..];
+    let noise_floor = median_data_amplitude(&matrix, size);
+    let threshold = noise_floor * 0.5;
+
+    let mut raw_bits: Vec<u8> = Vec::with_capacity(pay_cells.len() * 2);
+    for &(x, y) in pay_cells {
+        let v = matrix[y * size + x];
+        if v.norm() < threshold {
+            raw_bits.push(0); raw_bits.push(0);
+        } else {
+            raw_bits.push(if v.re > 0.0 { 1 } else { 0 });
+            raw_bits.push(if v.im > 0.0 { 1 } else { 0 });
+        }
+    }
+    // De-interleave
+    let mut perm: Vec<usize> = (0..pay_cells.len() * 2).collect();
+    let mut rng = SplitMix64::new(interleave_seed());
+    for i in (1..perm.len()).rev() {
+        let j = (rng.next() as usize) % (i + 1);
+        perm.swap(i, j);
+    }
+    let mut bits = vec![0u8; raw_bits.len()];
+    for k in 0..perm.len() {
+        if k < bits.len() && perm[k] < raw_bits.len() {
+            bits[perm[k]] = raw_bits[k];
+        }
+    }
+    // Pack
+    let mut out = Vec::with_capacity(bits.len() / 8);
+    for chunk in bits.chunks(8) {
+        if chunk.len() < 8 { break; }
+        let mut b = 0u8;
+        for (i, &bit) in chunk.iter().enumerate() { b |= bit << (7 - i); }
+        out.push(b);
+    }
+    Ok((DecodedGlint {
+        stream: out,
+        rotation_deg: 0.0,
+        noise_floor: threshold,
+        threshold_mult: 0.5,
+    }, sh))
+}

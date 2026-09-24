@@ -32,6 +32,7 @@ fn build_opts(password: &str) -> EncodeOptions {
         sign_with_app_identity: false,
         extra_signatures: Vec::new(),
         tsa_block: None,
+        progressive: false,
     }
 }
 
