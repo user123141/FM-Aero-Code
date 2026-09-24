@@ -127,6 +127,12 @@ impl WasmScanner {
     }
     pub fn received_count(&self) -> u32 { self.pages.len() as u32 }
 
+    /// Last measured rotation in degrees (from decode_luma).
+    pub fn last_rotation(&self) -> f32 { self.last_rotation_deg }
+
+    /// Last measured noise floor (threshold actually used).
+    pub fn last_noise_floor(&self) -> f32 { self.last_noise_floor }
+
     /// Pages we still need (ARQ feedback). Empty if complete or not started.
     pub fn missing_pages(&self) -> Vec<u16> {
         if self.total == 0 { return Vec::new(); }

@@ -154,7 +154,13 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
       <canvas id="preview"></canvas>
       <div class="ar-frame" id="ar-frame"><div class="crosshair"></div></div>
       <div class="scanline"></div>
-      <div class="hud"><span class="pill" id="status-pill"><span class="dot"></span><span id="status-text">Initializing</span></span></div>
+      <div style="position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:6;pointer-events:none">
+        <span class="pill" style="font-size:11px"><span id="hud-missing" style="color:var(--warn)"></span></span>
+      </div>
+      <div class="hud">
+        <span class="pill" id="status-pill"><span class="dot"></span><span id="status-text">Initializing</span></span>
+        <span class="pill" style="margin-top:6px"><span id="hud-rotation">rot: 0.0В°</span>&nbsp;&nbsp;<span id="hud-pages">pages: 0/0</span></span>
+      </div>
     </div>
     <div class="tb">
       <button class="btn icon" id="btn-flip">Flip</button>
@@ -182,6 +188,25 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
           <div style="font-size:12px;margin-top:6px;color:var(--fg-3)" id="file-info">No file</div>
         </div>
         <input type="file" id="file-input" style="display:none">
+      </div>
+      <div class="section" id="carrier-section" style="display:none">
+        <div class="section-label">Carrier (stego mode)</div>
+        <div class="drop-zone" id="carrier-zone">
+          <div class="plus">+</div>
+          <div>Tap or drop an image</div>
+          <div style="font-size:12px;margin-top:6px;color:var(--fg-3)" id="carrier-info">No carrier</div>
+        </div>
+        <input type="file" id="carrier-input" style="display:none" accept="image/*">
+      </div>
+      <div class="section" id="metadata-section" style="display:none">
+        <div class="section-label">Metadata (stego)</div>
+        <div class="field" style="margin-bottom:10px">
+          <input type="text" id="author-input" placeholder="Author (optional)" autocomplete="off">
+        </div>
+        <div class="field">
+          <input type="text" id="license-input" placeholder="License (optional)" autocomplete="off">
+        </div>
+
       </div>
       <div class="section">
         <div class="section-label">Or type</div>
@@ -234,6 +259,10 @@ const toast = (msg, kind) => {
 };
 let wasm_ready = false, currentStream = null, facingFront = false;
 let encodeMode = "aeroglint";
+let carrierFile = null;
+let pagesReceived = 0;
+let pagesTotal = 0;
+let missingPages = [];
 let autoInterval = null;
 let scanner = null, lastResult = null, selectedFile = null;
 async function initWasm() {
@@ -387,12 +416,12 @@ $("btn-encode").onclick = async () => {
     const resilience = document.getElementById("resilience").checked ? 4 : 0;
     let png;
     if (encodeMode === "stego") {
-      if (!selectedFile || !/^image\//.test(selectedFile.type)) {
-        toast("Stego: pick an image carrier", "warn");
-        $("create-status").innerHTML = "<span class=k>Stego needs an image carrier</span>";
+      if (!carrierFile) {
+        toast("Stego: load a carrier image", "warn");
+        $("create-status").innerHTML = "<span class=k>Load a carrier image below</span>";
         return;
       }
-      const carrierBytes = new Uint8Array(await selectedFile.arrayBuffer());
+      const carrierBytes = new Uint8Array(await carrierFile.arrayBuffer());
       const payload = data;
       png = stego_embed_wasm(carrierBytes, payload, password);
       if (!png || !png.length) {
@@ -455,19 +484,43 @@ function escapeHtml(s) {
   const drop = document.getElementById("drop-zone");
   function setMode(m) {
     encodeMode = m;
+    const carrier = document.getElementById("carrier-section");
+    const meta = document.getElementById("metadata-section");
     if (m === "aeroglint") {
       ag.style.background = "rgba(255,255,255,.1)"; ag.style.color = "var(--fg)";
       st.style.background = "transparent"; st.style.color = "var(--fg-2)";
       hint.textContent = "Printable spectral pattern.";
+      if (carrier) carrier.style.display = "none";
+      if (meta) meta.style.display = "none";
     } else {
       st.style.background = "rgba(255,255,255,.1)"; st.style.color = "var(--fg)";
       ag.style.background = "transparent"; ag.style.color = "var(--fg-2)";
-      hint.textContent = "Hide data inside a normal photo (carrier = source image).";
+      hint.textContent = "Hide data inside a normal photo. Source = payload, carrier = photo.";
+      if (carrier) carrier.style.display = "block";
+      if (meta) meta.style.display = "block";
     }
   }
   ag.onclick = () => setMode("aeroglint");
   st.onclick = () => setMode("stego");
 })();
+
+// Carrier handlers (stego mode)
+const cZone = document.getElementById("carrier-zone");
+const cInput = document.getElementById("carrier-input");
+const cInfo = document.getElementById("carrier-info");
+if (cZone) cZone.onclick = () => cInput.click();
+if (cInput) cInput.onchange = (e) => {
+  carrierFile = e.target.files[0];
+  cInfo.textContent = carrierFile ? carrierFile.name + " (" + carrierFile.size + " B)" : "No carrier";
+};
+if (cZone) {
+  ["dragover","dragenter"].forEach((ev) => cZone.addEventListener(ev, (e) => { e.preventDefault(); cZone.classList.add("dragover"); }));
+  ["dragleave","drop"].forEach((ev) => cZone.addEventListener(ev, (e) => { e.preventDefault(); cZone.classList.remove("dragover"); }));
+  cZone.addEventListener("drop", (e) => {
+    const f = e.dataTransfer.files[0];
+    if (f && /^image\//.test(f.type)) { carrierFile = f; cInfo.textContent = f.name + " (" + f.size + " B)"; }
+  });
+}
 
 initWasm().then(() => startCamera(false));
 if ("serviceWorker" in navigator) {
