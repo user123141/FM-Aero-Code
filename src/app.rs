@@ -15,6 +15,11 @@ use crate::settings::Settings;
 use crate::steganography::StegoMode;
 use crate::types::DataType;
 use crate::VERSION;
+use crate::audio::{
+    capacity_bytes as audio_capacity,
+    embed_wav, extract_wav, read_wav, write_wav,
+    AudioEmbedOptions, AudioMode, WavFile,
+};
 
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 32.0;
@@ -22,7 +27,7 @@ const PREVIEW_MAX_FRAMES: usize = 128;
 const PREVIEW_FRAME_MS: u64 = 100;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode { AeroGlint, Stego }
+enum Mode { AeroGlint, Stego, Audio }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab { Pattern, Decoded, Keys, Stego, About }
@@ -41,6 +46,26 @@ impl PrintKind {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PrintSize { A4, Letter, Legal }
 
+#[derive(Debug, Clone)]
+struct AudioEncodeResult {
+    wav_bytes: Vec<u8>,
+    name: String,
+    peaks: Vec<f32>,
+    payload_bytes: usize,
+    fec_bytes: usize,
+    capacity_bytes: usize,
+    mode_label: String,
+    signed: bool,
+    signer_pubkey: String,
+}
+
+#[derive(Debug, Clone)]
+struct AudioDecodeResult {
+    payload: Vec<u8>,
+    name: String,
+    view: AudioDecodedView,
+}
+
 enum Msg {
     Log(String),
     Error(String),
@@ -52,6 +77,8 @@ enum Msg {
         page_count: usize,
     },
     Decoded { payload: Vec<u8>, dt: DataType, name: String, sha: String, ok: bool },
+    AudioEncodeDone(AudioEncodeResult),
+    AudioDecodeDone(AudioDecodeResult),
 }
 
 struct DecodedView {
@@ -63,6 +90,18 @@ struct DecodedView {
     bytes: Vec<u8>,
     texture: Option<egui::TextureHandle>,
     dim: (u32, u32),
+}
+
+#[derive(Debug, Clone)]
+struct AudioDecodedView {
+    name: String,
+    size: usize,
+    sha: String,
+    author: String,
+    license: String,
+    timestamp: u32,
+    signature_ok: Option<bool>,
+    signer_pubkey: String,
 }
 
 pub struct FmAeroApp {
@@ -144,6 +183,27 @@ pub struct FmAeroApp {
     stego_preview_tex: Option<egui::TextureHandle>,
     stego_carrier_tex: Option<egui::TextureHandle>,
     stego_preview_dirty: bool,
+
+    // ---- Audio mode state ----
+    audio_carrier: Option<Vec<u8>>,
+    audio_carrier_name: String,
+    audio_carrier_peaks: Option<Vec<f32>>,
+    audio_payload: Option<Vec<u8>>,
+    audio_payload_name: String,
+    audio_text: String,
+    audio_mode: AudioMode,
+    audio_author: String,
+    audio_license: String,
+    audio_signing_seed: String,
+    audio_last_pubkey: String,
+    audio_use_encryption: bool,
+    audio_output: Option<(Vec<u8>, String)>,
+    audio_output_peaks: Option<Vec<f32>>,
+    audio_decoded_payload: Option<(Vec<u8>, String)>,
+    audio_extract_src: Option<Vec<u8>>,
+    audio_extract_src_name: String,
+    audio_decoded: Option<AudioDecodedView>,
+    audio_last_msg: String,
 }
 
 impl FmAeroApp {
@@ -236,6 +296,25 @@ impl FmAeroApp {
             stego_preview_tex: None,
             stego_carrier_tex: None,
             stego_preview_dirty: false,
+            audio_carrier: None,
+            audio_carrier_name: String::new(),
+            audio_carrier_peaks: None,
+            audio_payload: None,
+            audio_payload_name: String::new(),
+            audio_text: String::new(),
+            audio_mode: AudioMode::Robust,
+            audio_author: String::new(),
+            audio_license: String::new(),
+            audio_signing_seed: String::new(),
+            audio_last_pubkey: String::new(),
+            audio_use_encryption: false,
+            audio_output: None,
+            audio_output_peaks: None,
+            audio_decoded_payload: None,
+            audio_extract_src: None,
+            audio_extract_src_name: String::new(),
+            audio_decoded: None,
+            audio_last_msg: String::new(),
             multisig_file: String::new(),
             multisig_seed_input: String::new(),
             multisig_purpose_input: "author".to_string(),
@@ -527,6 +606,32 @@ impl FmAeroApp {
                     self.tab = Tab::Pattern;
                     self.zoom = 1.0;
                     self.pan = Vec2::ZERO;
+                }
+                Msg::AudioEncodeDone(r) => {
+                    if let Some(t) = self.op_started.take() {
+                        self.last_duration = Some(t.elapsed().as_secs_f32());
+                    }
+                    self.busy = false;
+                    let msg = format!(
+                        "Audio OK ({}): {} B payload / {} B stream / {} B cap",
+                        r.mode_label, r.payload_bytes, r.fec_bytes, r.capacity_bytes);
+                    self.push(msg.clone());
+                    self.audio_last_msg = msg;
+                    if r.signed { self.audio_last_pubkey = r.signer_pubkey.clone(); }
+                    self.audio_output_peaks = Some(r.peaks);
+                    self.audio_output = Some((r.wav_bytes, r.name));
+                }
+                Msg::AudioDecodeDone(r) => {
+                    if let Some(t) = self.op_started.take() {
+                        self.last_duration = Some(t.elapsed().as_secs_f32());
+                    }
+                    self.busy = false;
+                    let msg = format!("Audio extracted {} B | sha={}",
+                        r.payload.len(), r.view.sha);
+                    self.push(msg.clone());
+                    self.audio_last_msg = msg;
+                    self.audio_decoded = Some(r.view);
+                    self.audio_decoded_payload = Some((r.payload, r.name));
                 }
                 Msg::Decoded { payload, dt, name, sha, ok } => {
                     self.busy = false;
@@ -1228,22 +1333,509 @@ impl FmAeroApp {
         }
     }
 
+    // ============================================================
+    // AUDIO MODE
+    // ============================================================
+
+    fn audio_encode(&mut self) {
+        let Some(carrier_bytes) = self.audio_carrier.clone() else {
+            self.push("audio: load a WAV carrier first"); return;
+        };
+        let (payload, name) = if let Some(p) = self.audio_payload.clone() {
+            (p, self.audio_payload_name.clone())
+        } else if !self.audio_text.is_empty() {
+            (self.audio_text.as_bytes().to_vec(), "message.txt".to_string())
+        } else {
+            self.push("audio: no payload (load a file or type text)"); return;
+        };
+        let password = if self.audio_use_encryption && !self.password.is_empty() {
+            self.password.clone()
+        } else { String::new() };
+        let opts = AudioEmbedOptions {
+            password,
+            mode: self.audio_mode,
+            author: self.audio_author.clone(),
+            license: self.audio_license.clone(),
+            signing_seed: parse_hex_seed(&self.audio_signing_seed),
+            original_name: name.clone(),
+        };
+        let carrier_name = self.audio_carrier_name.clone();
+        let tx = self.tx.clone();
+        self.busy = true;
+        self.op_started = Some(Instant::now());
+        self.push(format!("Audio embed (async): {} B -> {} ({})",
+            payload.len(), name, self.audio_mode.label()));
+        std::thread::spawn(move || {
+            match read_wav(&carrier_bytes) {
+                Ok(carrier) => match embed_wav(&carrier, &payload, &opts) {
+                    Ok(out) => match write_wav(&out.wav) {
+                        Ok(wav_bytes) => {
+                            let stem = std::path::Path::new(&carrier_name)
+                                .file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+                            let out_name = format!("stego_{}.wav", stem);
+                            let peaks = compute_peaks(&out.wav, 512);
+                            let _ = tx.send(Msg::AudioEncodeDone(AudioEncodeResult {
+                                wav_bytes,
+                                name: out_name,
+                                peaks,
+                                payload_bytes: out.payload_bytes,
+                                fec_bytes: out.fec_bytes,
+                                capacity_bytes: out.capacity_bytes,
+                                mode_label: out.mode.label().to_string(),
+                                signed: out.signed,
+                                signer_pubkey: out.signer_pubkey,
+                            }));
+                        }
+                        Err(e) => { let _ = tx.send(Msg::Error(format!("audio write: {}", e))); }
+                    },
+                    Err(e) => { let _ = tx.send(Msg::Error(format!("audio embed: {}", e))); }
+                },
+                Err(e) => { let _ = tx.send(Msg::Error(format!("audio read: {}", e))); }
+            }
+        });
+    }
+
+    fn audio_decode(&mut self) {
+        let (src_bytes, src_label) = if let Some(s) = self.audio_extract_src.clone() {
+            (s, format!("user selection ({})", self.audio_extract_src_name))
+        } else if let Some((bytes, _)) = self.audio_output.clone() {
+            (bytes, "last output (RAM)".to_string())
+        } else if let Some(c) = self.audio_carrier.clone() {
+            (c, format!("carrier ({})", self.audio_carrier_name))
+        } else {
+            self.push("audio: nothing to extract from"); return;
+        };
+        let password = if self.audio_use_encryption && !self.password.is_empty() {
+            self.password.clone()
+        } else { String::new() };
+        let tx = self.tx.clone();
+        self.busy = true;
+        self.op_started = Some(Instant::now());
+        self.push(format!("Audio extract from: {} (async)...", src_label));
+        std::thread::spawn(move || {
+            match read_wav(&src_bytes) {
+                Ok(stego) => match extract_wav(&stego, &password) {
+                    Ok(r) => {
+                        let out_name = if r.name.is_empty() {
+                            format!("audio_extracted_{}.bin", r.payload.len())
+                        } else { r.name.clone() };
+                        let _ = tx.send(Msg::AudioDecodeDone(AudioDecodeResult {
+                            payload: r.payload.clone(),
+                            name: out_name.clone(),
+                            view: AudioDecodedView {
+                                name: out_name,
+                                size: r.payload.len(),
+                                sha: r.content_hash,
+                                author: r.author,
+                                license: r.license,
+                                timestamp: r.timestamp,
+                                signature_ok: r.signature_ok,
+                                signer_pubkey: r.signer_pubkey,
+                            },
+                        }));
+                    }
+                    Err(e) => { let _ = tx.send(Msg::Error(format!("audio extract: {}", e))); }
+                },
+                Err(e) => { let _ = tx.send(Msg::Error(format!("audio read: {}", e))); }
+            }
+        });
+    }
+
+    fn audio_test_roundtrip(&mut self) {
+        let Some(carrier_bytes) = self.audio_carrier.clone() else {
+            self.push("audio test: load a WAV carrier first"); return;
+        };
+        let (payload, name) = if let Some(p) = self.audio_payload.clone() {
+            (p, self.audio_payload_name.clone())
+        } else if !self.audio_text.is_empty() {
+            (self.audio_text.as_bytes().to_vec(), "message.txt".to_string())
+        } else {
+            self.push("audio test: no payload"); return;
+        };
+        let password = if self.audio_use_encryption && !self.password.is_empty() {
+            self.password.clone()
+        } else { String::new() };
+        let t0 = Instant::now();
+        let Ok(carrier) = read_wav(&carrier_bytes) else {
+            self.push("audio test: carrier decode failed"); return;
+        };
+        let opts = AudioEmbedOptions {
+            password: password.clone(),
+            mode: self.audio_mode,
+            author: self.audio_author.clone(),
+            license: self.audio_license.clone(),
+            signing_seed: parse_hex_seed(&self.audio_signing_seed),
+            original_name: name,
+        };
+        let out = match embed_wav(&carrier, &payload, &opts) {
+            Ok(o) => o,
+            Err(e) => { self.push(format!("audio test: embed failed: {}", e)); return; }
+        };
+        let recovered = match extract_wav(&out.wav, &password) {
+            Ok(r) => r.payload,
+            Err(e) => { self.push(format!("audio test: extract failed: {}", e)); return; }
+        };
+        let elapsed = t0.elapsed().as_secs_f32();
+        if recovered == payload {
+            self.push(format!("Audio test PASS in {:.2}s: {} B round-tripped OK",
+                elapsed, payload.len()));
+        } else {
+            self.push(format!("Audio test FAIL in {:.2}s: got {} B, expected {} B",
+                elapsed, recovered.len(), payload.len()));
+        }
+    }
+
+    fn ui_audio_side(&mut self, ui: &mut egui::Ui) {
+        ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(6.0);
+            ui.heading("Audio Steganography");
+            ui.label(RichText::new("Hide data inside a WAV. The audio is unchanged for the listener.").weak());
+            ui.add_space(6.0);
+            ui.separator();
+
+            ui.label(RichText::new("Audio mode").strong());
+            ui.horizontal(|ui| {
+                let w = (ui.available_width() - 8.0) / 2.0;
+                let rb = ui.add_sized([w, 32.0],
+                    egui::SelectableLabel::new(self.audio_mode == AudioMode::Robust, "Robust"));
+                if rb.clicked() { self.audio_mode = AudioMode::Robust; }
+                let bp = ui.add_sized([w, 32.0],
+                    egui::SelectableLabel::new(self.audio_mode == AudioMode::BitPerfect, "BitPerfect"));
+                if bp.clicked() { self.audio_mode = AudioMode::BitPerfect; }
+            });
+            ui.label(RichText::new(match self.audio_mode {
+                AudioMode::Robust => "FFT-OFDM in 4-14 kHz. Survives MP3 320 / AAC 256.",
+                AudioMode::BitPerfect => "LSB of PCM samples. WAV / FLAC only, byte-exact.",
+            }).weak());
+            ui.add_space(6.0);
+            ui.separator();
+
+            ui.heading("Carrier WAV");
+            ui.horizontal(|ui| {
+                if ui.button("Load WAV").clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("audio", &["wav"])
+                        .pick_file() {
+                        if let Ok(b) = std::fs::read(&p) {
+                            self.audio_carrier_name = p.file_name()
+                                .and_then(|n| n.to_str()).unwrap_or("carrier.wav").to_string();
+                            if let Ok(w) = read_wav(&b) {
+                                self.audio_carrier_peaks = Some(compute_peaks(&w, 512));
+                            }
+                            self.audio_carrier = Some(b);
+                        }
+                    }
+                }
+                if self.audio_carrier.is_some() {
+                    if ui.small_button("x").clicked() {
+                        self.audio_carrier = None;
+                        self.audio_carrier_peaks = None;
+                        self.audio_carrier_name.clear();
+                    }
+                }
+            });
+            if !self.audio_carrier_name.is_empty() {
+                ui.label(RichText::new(format!("[{}]", self.audio_carrier_name)).weak());
+                if let Some(c) = self.audio_carrier.as_ref() {
+                    if let Ok(w) = read_wav(c) {
+                        let dur = w.frames() as f64 / w.sample_rate.max(1) as f64;
+                        ui.label(RichText::new(format!(
+                            "{} Hz, {} ch, {} bit, {:.1}s",
+                            w.sample_rate, w.channels, w.bits_per_sample, dur
+                        )).weak());
+                    }
+                }
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.heading("Payload");
+            ui.horizontal(|ui| {
+                if ui.button("Load file").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_file() {
+                        if let Ok(b) = std::fs::read(&p) {
+                            self.audio_payload_name = p.file_name()
+                                .and_then(|n| n.to_str()).unwrap_or("secret.bin").to_string();
+                            self.audio_payload = Some(b);
+                        }
+                    }
+                }
+                if self.audio_payload.is_some() {
+                    if ui.small_button("x").clicked() {
+                        self.audio_payload = None;
+                        self.audio_payload_name.clear();
+                    }
+                }
+            });
+            if let Some(p) = self.audio_payload.as_ref() {
+                ui.label(RichText::new(format!("[{}] {} B",
+                    self.audio_payload_name, p.len())).weak());
+            } else {
+                ui.label(RichText::new("or type text:").weak());
+                ui.add(egui::TextEdit::multiline(&mut self.audio_text)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("secret message"));
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.heading("Metadata (optional)");
+            ui.horizontal(|ui| {
+                ui.label("Author:");
+                ui.add(egui::TextEdit::singleline(&mut self.audio_author)
+                    .desired_width(ui.available_width() - 70.0)
+                    .hint_text("your name"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("License:");
+                ui.add(egui::TextEdit::singleline(&mut self.audio_license)
+                    .desired_width(ui.available_width() - 70.0)
+                    .hint_text("CC-BY-4.0, MIT, ..."));
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("Signing key (Ed25519)").strong());
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.audio_signing_seed)
+                    .password(true)
+                    .desired_width(ui.available_width() - 90.0)
+                    .hint_text("hex seed (empty = unsigned)"));
+                if ui.small_button("New").clicked() {
+                    let (seed, pk) = crate::steganography::generate_signing_keypair();
+                    self.audio_signing_seed = seed;
+                    self.audio_last_pubkey = pk.clone();
+                    self.push(format!("New audio signing key. Pubkey: {}", pk));
+                }
+            });
+            if !self.audio_last_pubkey.is_empty() {
+                ui.label(RichText::new(format!("Pubkey: {}...",
+                    &self.audio_last_pubkey[..16.min(self.audio_last_pubkey.len())])).weak());
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.heading("Options");
+            ui.checkbox(&mut self.audio_use_encryption, "Encrypt payload (AeroSeal v1)");
+            if self.audio_use_encryption {
+                ui.horizontal(|ui| {
+                    ui.label("Password:");
+                    ui.add(egui::TextEdit::singleline(&mut self.password)
+                        .password(true)
+                        .desired_width(ui.available_width() - 60.0)
+                        .hint_text("shared with other modes"));
+                });
+                if self.password.is_empty() {
+                    ui.colored_label(Color32::from_rgb(255, 200, 100),
+                        RichText::new("Enter password or embed will fail").small());
+                }
+            }
+
+            if let Some(c) = self.audio_carrier.as_ref() {
+                if let Ok(w) = read_wav(c) {
+                    let cap = audio_capacity(&w, self.audio_mode);
+                    let payload_len = self.audio_payload.as_ref().map(|p| p.len())
+                        .unwrap_or_else(|| self.audio_text.len());
+                    let frac = if cap > 0 { payload_len as f32 / cap as f32 } else { 0.0 };
+                    let color = if frac > 1.0 {
+                        Color32::from_rgb(255, 120, 120)
+                    } else if frac > 0.85 {
+                        Color32::from_rgb(255, 200, 100)
+                    } else {
+                        Color32::from_rgb(120, 220, 140)
+                    };
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(format!("Capacity {} B ({})",
+                        cap, self.audio_mode.label())).weak());
+                    ui.add(egui::ProgressBar::new(frac.min(1.0))
+                        .desired_width(ui.available_width())
+                        .fill(color)
+                        .text(format!("{}/{} B ({:.0}%)", payload_len, cap, frac * 100.0)));
+                }
+            }
+
+            ui.add_space(8.0);
+            let ready = self.audio_carrier.is_some()
+                && (self.audio_payload.is_some() || !self.audio_text.is_empty());
+            ui.add_enabled_ui(ready, |ui| {
+                if ui.add_sized([ui.available_width(), 36.0],
+                    egui::Button::new(RichText::new("EMBED into WAV").strong())).clicked() {
+                    self.audio_encode();
+                }
+                if ui.add_sized([ui.available_width(), 30.0],
+                    egui::Button::new("Test round-trip (in RAM)")).clicked() {
+                    self.audio_test_roundtrip();
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.heading("Extract");
+            ui.horizontal(|ui| {
+                if ui.button("Load stego WAV").clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("audio", &["wav"])
+                        .pick_file() {
+                        if let Ok(b) = std::fs::read(&p) {
+                            self.audio_extract_src_name = p.file_name()
+                                .and_then(|n| n.to_str()).unwrap_or("stego.wav").to_string();
+                            self.audio_extract_src = Some(b);
+                        }
+                    }
+                }
+                if ui.small_button("Clear").clicked() {
+                    self.audio_extract_src = None;
+                    self.audio_extract_src_name.clear();
+                }
+            });
+            if !self.audio_extract_src_name.is_empty() {
+                ui.label(RichText::new(format!("source: {}", self.audio_extract_src_name)).weak());
+            } else {
+                ui.label(RichText::new("(empty - will use last output)").weak());
+            }
+            let can_ex = self.audio_extract_src.is_some()
+                || self.audio_output.is_some()
+                || self.audio_carrier.is_some();
+            ui.add_enabled_ui(can_ex, |ui| {
+                if ui.add_sized([ui.available_width(), 36.0],
+                    egui::Button::new(RichText::new("EXTRACT payload").strong())).clicked() {
+                    self.audio_decode();
+                }
+            });
+
+            if let Some((bytes, name)) = self.audio_output.as_ref() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new(format!("Stego WAV: {} ({:.1} KB)",
+                    name, bytes.len() as f64 / 1024.0)).weak());
+                let n = name.clone(); let b = bytes.clone();
+                if ui.add_sized([ui.available_width(), 32.0],
+                    egui::Button::new("Save stego WAV")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_file_name(&n).save_file() {
+                        if std::fs::write(&p, &b).is_ok() {
+                            self.push(format!("saved {}", p.display()));
+                        }
+                    }
+                }
+            }
+            if let Some((bytes, name)) = self.audio_decoded_payload.as_ref() {
+                ui.label(RichText::new(format!("Decoded payload: {} ({:.1} KB)",
+                    name, bytes.len() as f64 / 1024.0)).weak());
+                let n = name.clone(); let b = bytes.clone();
+                if ui.add_sized([ui.available_width(), 32.0],
+                    egui::Button::new("Save decoded payload")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_file_name(&n).save_file() {
+                        if std::fs::write(&p, &b).is_ok() {
+                            self.push(format!("saved {}", p.display()));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn ui_audio_center(&mut self, ui: &mut egui::Ui) {
+        let avail = ui.available_width();
+        let have_carrier = self.audio_carrier_peaks.is_some();
+        let have_output = self.audio_output_peaks.is_some();
+        if !have_carrier && !have_output {
+            ui.add_space(60.0);
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("Load a WAV on the left, then EMBED to see the waveform preview")
+                    .weak());
+            });
+            self.audio_decoded_card(ui);
+            return;
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Waveform (channel 0, peak envelope)").weak());
+        ui.add_space(4.0);
+        ui.horizontal_top(|ui| {
+            let col = (avail - 20.0) / 2.0;
+            ui.vertical(|ui| {
+                ui.set_min_width(col);
+                ui.set_max_width(col);
+                ui.label(RichText::new("Carrier").strong());
+                if let Some(peaks) = self.audio_carrier_peaks.as_ref() {
+                    draw_peaks(ui, peaks, 120.0, Color32::from_rgb(120, 200, 255));
+                } else {
+                    ui.label(RichText::new("(none)").weak());
+                }
+            });
+            ui.vertical(|ui| {
+                ui.set_min_width(col);
+                ui.set_max_width(col);
+                ui.label(RichText::new("Stego output").strong());
+                if let Some(peaks) = self.audio_output_peaks.as_ref() {
+                    draw_peaks(ui, peaks, 120.0, Color32::from_rgb(120, 220, 140));
+                } else {
+                    ui.label(RichText::new("(embed to generate)").weak());
+                }
+            });
+        });
+        self.audio_decoded_card(ui);
+        if !self.audio_last_msg.is_empty() {
+            ui.add_space(10.0);
+            ui.separator();
+            ui.colored_label(Color32::from_rgb(120, 200, 255),
+                RichText::new(&self.audio_last_msg).strong());
+        }
+    }
+
+    fn audio_decoded_card(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = self.audio_decoded.clone() else { return; };
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label(RichText::new("Decoded payload").strong());
+        ui.horizontal(|ui| { ui.label(RichText::new("Name:").weak()); ui.label(RichText::new(&d.name).strong()); });
+        ui.horizontal(|ui| { ui.label(RichText::new("Size:").weak()); ui.label(format!("{} B", d.size)); });
+        let sha_short = if d.sha.len() >= 16 { &d.sha[..16] } else { &d.sha };
+        ui.horizontal(|ui| { ui.label(RichText::new("SHA:").weak()); ui.label(RichText::new(sha_short).monospace().weak()); });
+        if !d.author.is_empty() {
+            ui.horizontal(|ui| { ui.label(RichText::new("Author:").weak()); ui.label(RichText::new(&d.author).strong()); });
+        }
+        if !d.license.is_empty() {
+            ui.horizontal(|ui| { ui.label(RichText::new("License:").weak()); ui.label(RichText::new(&d.license).strong()); });
+        }
+        if d.timestamp > 0 {
+            ui.horizontal(|ui| { ui.label(RichText::new("Timestamp:").weak()); ui.label(crate::types::fmt_unix(d.timestamp)); });
+        }
+        if let Some(ok) = d.signature_ok {
+            let (txt, color) = if ok {
+                ("Signature: VALID", Color32::from_rgb(120, 220, 140))
+            } else {
+                ("Signature: INVALID", Color32::from_rgb(255, 120, 120))
+            };
+            ui.colored_label(color, RichText::new(txt).strong());
+            if !d.signer_pubkey.is_empty() {
+                let short = &d.signer_pubkey[..16.min(d.signer_pubkey.len())];
+                ui.label(RichText::new(format!("Signer: {}...", short)).weak());
+            }
+        }
+    }
+
     fn ui_side(&mut self, ui: &mut egui::Ui) {
         // Mode toggle at top of left panel
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let w = (ui.available_width() - 8.0) / 2.0;
+            let w = (ui.available_width() - 8.0) / 3.0;
             let ag = ui.add_sized([w, 34.0],
                 egui::SelectableLabel::new(self.mode == Mode::AeroGlint, "AeroGlint"));
             if ag.clicked() { self.mode = Mode::AeroGlint; }
             let st = ui.add_sized([w, 34.0],
                 egui::SelectableLabel::new(self.mode == Mode::Stego, "Stego"));
             if st.clicked() { self.mode = Mode::Stego; }
+            let au = ui.add_sized([w, 34.0],
+                egui::SelectableLabel::new(self.mode == Mode::Audio, "Audio"));
+            if au.clicked() { self.mode = Mode::Audio; }
         });
         ui.separator();
 
         if self.mode == Mode::Stego {
             self.ui_stego_side(ui);
+            return;
+        }
+        if self.mode == Mode::Audio {
+            self.ui_audio_side(ui);
             return;
         }
 
@@ -1503,6 +2095,10 @@ impl FmAeroApp {
     fn ui_center(&mut self, ui: &mut egui::Ui) {
         if self.mode == Mode::Stego {
             self.ui_stego_center(ui);
+            return;
+        }
+        if self.mode == Mode::Audio {
+            self.ui_audio_center(ui);
             return;
         }
         match self.tab {
@@ -2153,6 +2749,64 @@ impl FmAeroApp {
                 }
             }
         }
+    }
+}
+
+fn parse_hex_seed(s: &str) -> Option<[u8; 32]> {
+    let t = s.trim();
+    if t.len() != 64 { return None; }
+    let b = hex::decode(t).ok()?;
+    if b.len() != 32 { return None; }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&b);
+    Some(arr)
+}
+
+/// Downsample a WAV channel-0 signal into N peak buckets for waveform display.
+fn compute_peaks(wav: &WavFile, buckets: usize) -> Vec<f32> {
+    let n_mono = if wav.channels == 0 {
+        0
+    } else {
+        wav.samples.len() / wav.channels as usize
+    };
+    let mut peaks = vec![0.0f32; buckets];
+    if n_mono == 0 || buckets == 0 { return peaks; }
+    let ch = wav.channels as usize;
+    let step = (n_mono / buckets).max(1);
+    for b in 0..buckets {
+        let start = b * step;
+        if start >= n_mono { break; }
+        let end = ((b + 1) * step).min(n_mono);
+        let mut p = 0.0f32;
+        for i in start..end {
+            let v = wav.samples[i * ch].abs();
+            if v > p { p = v; }
+        }
+        peaks[b] = p;
+    }
+    peaks
+}
+
+/// Draw a peak-envelope waveform into the current UI.
+fn draw_peaks(ui: &mut egui::Ui, peaks: &[f32], height: f32, color: Color32) {
+    let (resp, painter) = ui.allocate_painter(
+        egui::vec2(ui.available_width().max(50.0), height),
+        egui::Sense::hover());
+    let rect = resp.rect;
+    let mid_y = rect.center().y;
+    let half = rect.height() * 0.45;
+    let n = peaks.len();
+    if n == 0 { return; }
+    let w = rect.width();
+    let step = w / n as f32;
+    let bar_w = step.max(1.0);
+    for (i, &p) in peaks.iter().enumerate() {
+        let x0 = rect.left() + i as f32 * step;
+        let h = p.min(1.0) * half;
+        let r = egui::Rect::from_min_max(
+            egui::pos2(x0, mid_y - h),
+            egui::pos2(x0 + bar_w, mid_y + h));
+        painter.rect_filled(r, 0.0, color);
     }
 }
 

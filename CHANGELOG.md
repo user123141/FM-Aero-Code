@@ -2,6 +2,46 @@
 
 All notable changes to FM Aero Code 2.
 
+## [3.16.5] - GUI Audio: compile fix + async embed/extract
+
+### Fixed
+- **GUI Audio panel failed to compile** (118 errors). The v3.16.4 PowerShell
+  patch inserted `audio_*` fields into `FmAeroApp::new()` init block, but the
+  struct-field insertion anchor (`stego_preview_dirty` + `multisig_file`)
+  never matched: in `FmAeroApp`, `stego_preview_dirty: bool,` is the last
+  field before the closing brace, not adjacent to `multisig_file`. Struct
+  and init were out of sync.
+  Fix: anchor on the last struct field + closing brace; verify presence
+  before inserting; abort on mismatch instead of silently continuing.
+
+### Changed
+- **Audio embed and extract are now async** (background thread). Previously
+  a 3-minute WAV froze the GUI for 1-2 s. Now the busy spinner + progress
+  tick run normally, and the result comes back via two new `Msg` variants
+  (`AudioEncodeDone`, `AudioDecodeDone`). Same pattern as AeroGlint encode.
+- Two new internal result structs in `app.rs`:
+  `AudioEncodeResult`, `AudioDecodeResult`.
+## [3.16.4] - GUI Audio panel
+
+### Added
+- **Third mode in the GUI: Audio.** The left-panel toggle is now
+  AeroGlint / Stego / **Audio**. The Audio panel mirrors the Stego layout:
+  carrier load, payload (file or text), mode (Robust / BitPerfect),
+  author / license, Ed25519 signing seed, password, capacity bar,
+  EMBED / EXTRACT / Test round-trip buttons, save outputs.
+- **Waveform previews** in the center panel: peak-envelope rendering of
+  the carrier (blue) and the stego output (green) side by side, so you
+  can confirm the audio content is visually unchanged.
+- **Decoded payload card** with name, size, SHA-256 prefix, author,
+  license, timestamp, and Ed25519 signature status (parallel to Stego).
+- New helpers in `app.rs`: `parse_hex_seed`, `compute_peaks` (512-bucket
+  peak envelope), `draw_peaks` (painter-based waveform drawing).
+
+### Notes
+- Audio embed / extract runs on the UI thread. For 3-minute tracks this
+  is ~1-2 s; if it feels sluggish we will move to the existing Msg worker
+  pattern in a follow-up.
+- No in-app playback; use any media player to listen to the stego WAV.
 ## [3.16.3] - Audio Robust: MDCT-QIM replaced with FFT-OFDM
 
 ### Fixed
