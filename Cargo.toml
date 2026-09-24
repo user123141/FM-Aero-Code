@@ -1,6 +1,6 @@
 [package]
 name = "fm_aero_code_2"
-version = "3.14.7"
+version = "3.15.0"
 edition = "2021"
 license = "MIT"
 authors = ["Maksym Skorina"]
@@ -73,6 +73,7 @@ hex          = "0.4"
 base64       = "0.22"
 zeroize      = "1.8"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+curve25519-dalek = "4"
 x25519-dalek  = { version = "2", features = ["static_secrets", "getrandom"] }
 getrandom    = { version = "0.2", features = ["js"] }
 walkdir      = "2.5"

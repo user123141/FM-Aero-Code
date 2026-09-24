@@ -49,7 +49,7 @@ is the reference spec so no detail gets lost.
 
 **Effort:** 4 sessions. Fallback: keep WASM FFT for old browsers.
 
-## 4. Watson Perceptual Masking
+## 4. Watson Perceptual Masking вњ… DONE v3.15.0
 
 **Goal:** adaptive QIM delta per block; invisible on smooth, robust on texture.
 
@@ -92,7 +92,7 @@ Camera demosaic preserves channel separation well enough for FFT.
 
 **Effort:** 2 sessions.
 
-## 7. Blockchain Anchor (Bitcoin OTS)
+## 7. Blockchain Anchor (Bitcoin OTS) вњ… DONE v3.15.0 (upgrade CLI)
 
 **Goal:** public timestamp proof cross-verifiable.
 
@@ -106,7 +106,7 @@ Camera demosaic preserves channel separation well enough for FFT.
 
 **Effort:** 1 session (mostly CLI + parsing).
 
-## 8. Zero-Knowledge Proof of Ownership
+## 8. Zero-Knowledge Proof of Ownership вњ… DONE v3.15.0 (Schnorr NIZK)
 
 **Goal:** prove you know the private key that signed a file WITHOUT revealing it.
 

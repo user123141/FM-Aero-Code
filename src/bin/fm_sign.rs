@@ -27,6 +27,9 @@ fn main() -> Result<()> {
         "verify" => verify(&args)?,
         "tsa" => tsa(&args)?,
         "ots" => ots(&args)?,
+        "zkp-prove" => zkp_prove_cmd(&args)?,
+        "zkp-verify" => zkp_verify_cmd(&args)?,
+        "ots-upgrade" => ots_upgrade_cmd(&args)?,
         "--help" | "-h" => print_help(),
         other => {
             eprintln!("Unknown command: {}", other);
@@ -269,4 +272,79 @@ fn ots(args: &[String]) -> Result<()> {
 fn base64_enc(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn zkp_prove_cmd(args: &[String]) -> Result<()> {
+    use fm_aero_code_2::crypto::zkp_prove;
+    let path = args.get(2).ok_or_else(|| anyhow!("missing file"))?;
+    let mut seed_hex = String::new();
+    let mut i = 3usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seed" if i + 1 < args.len() => { seed_hex = args[i + 1].clone(); i += 2; }
+            _ => i += 1,
+        }
+    }
+    if seed_hex.len() != 64 { return Err(anyhow!("--seed must be 64 hex chars")); }
+    let seed_bytes = hex::decode(&seed_hex)?;
+    if seed_bytes.len() != 32 { return Err(anyhow!("seed must decode to 32 bytes")); }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_bytes);
+
+    let bytes = std::fs::read(path)?;
+    let hash = fm_aero_code_2::tsa::sha256(&bytes);
+
+    let proof = zkp_prove(&seed, &hash)?;
+    let vk = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+    println!("ZKP proof generated");
+    println!("  pubkey: {}", hex::encode(vk.to_bytes()));
+    println!("  r:      {}", hex::encode(proof.r_bytes));
+    println!("  z:      {}", hex::encode(proof.z_bytes));
+    println!("  file_hash: {}", hex::encode(hash));
+    Ok(())
+}
+
+fn zkp_verify_cmd(args: &[String]) -> Result<()> {
+    use fm_aero_code_2::crypto::{zkp_verify, ZkProof};
+    let path = args.get(2).ok_or_else(|| anyhow!("missing file"))?;
+    let mut pk_hex = String::new();
+    let mut r_hex = String::new();
+    let mut z_hex = String::new();
+    let mut i = 3usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pubkey" if i + 1 < args.len() => { pk_hex = args[i + 1].clone(); i += 2; }
+            "--r" if i + 1 < args.len() => { r_hex = args[i + 1].clone(); i += 2; }
+            "--z" if i + 1 < args.len() => { z_hex = args[i + 1].clone(); i += 2; }
+            _ => i += 1,
+        }
+    }
+    let pk_b = hex::decode(&pk_hex)?; let r_b = hex::decode(&r_hex)?; let z_b = hex::decode(&z_hex)?;
+    if pk_b.len() != 32 || r_b.len() != 32 || z_b.len() != 32 {
+        return Err(anyhow!("pubkey / r / z must each be 32 bytes (64 hex)"));
+    }
+    let mut pk = [0u8; 32]; pk.copy_from_slice(&pk_b);
+    let mut r = [0u8; 32]; r.copy_from_slice(&r_b);
+    let mut z = [0u8; 32]; z.copy_from_slice(&z_b);
+
+    let bytes = std::fs::read(path)?;
+    let hash = fm_aero_code_2::tsa::sha256(&bytes);
+
+    let proof = ZkProof { r_bytes: r, z_bytes: z };
+    if zkp_verify(&proof, &pk, &hash) {
+        println!("ZKP: VALID (prover knows the private key)");
+    } else {
+        println!("ZKP: INVALID");
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn ots_upgrade_cmd(args: &[String]) -> Result<()> {
+    let path = args.get(2).ok_or_else(|| anyhow!("missing .ots file"))?;
+    match fm_aero_code_2::tsa::ots_upgrade(path)? {
+        Some(h) => println!("Bitcoin block height: {}", h),
+        None => println!("Not yet anchored to Bitcoin (retry later)"),
+    }
+    Ok(())
 }

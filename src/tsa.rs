@@ -162,3 +162,39 @@ pub fn try_opentimestamps(file_path: &str) -> Result<Option<String>> {
     let p = format!("{}.ots", file_path);
     if std::path::Path::new(&p).exists() { Ok(Some(p)) } else { Ok(None) }
 }
+
+/// Run `ots upgrade <file>.ots` to fetch Bitcoin anchor if available.
+/// Returns Ok(Some(block_height)) if upgraded, Ok(None) if not yet anchored.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ots_upgrade(ots_path: &str) -> Result<Option<u64>> {
+    use std::process::Command;
+    let status = Command::new("ots")
+        .args(&["upgrade", ots_path])
+        .status()
+        .map_err(|e| anyhow!("ots upgrade spawn: {}", e))?;
+    if !status.success() {
+        return Err(anyhow!("ots upgrade failed"));
+    }
+    // Try `ots info <file>` to get block height
+    let out = Command::new("ots")
+        .args(&["info", ots_path])
+        .output()
+        .map_err(|e| anyhow!("ots info spawn: {}", e))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Look for "Bitcoin block" followed by a number
+    for line in text.lines() {
+        if let Some(idx) = line.find("Bitcoin block") {
+            let rest = &line[idx..];
+            let num: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = num.parse::<u64>() {
+                return Ok(Some(n));
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn ots_upgrade(_ots_path: &str) -> Result<Option<u64>> {
+    Err(anyhow!("ots upgrade not available in WASM"))
+}

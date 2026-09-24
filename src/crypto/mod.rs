@@ -3,10 +3,12 @@ pub mod hash;
 pub mod sign;
 pub mod seal;
 pub mod seal2;
+pub mod zkp;
 
 pub use hash::{sha256_short, content_hash_8, content_hash_6, constant_time_eq, hmac_sha256};
 pub use sign::{sign_header, verify_header, generate_keypair, keypair_from_seed};
 pub use seal::{seal, open, pattern_fingerprint, pattern_id};
+pub use zkp::{prove as zkp_prove, verify as zkp_verify, ZkProof};
 pub use seal2::{
     seal_v2, seal_v2_multi, open_v2, open_v2_multi,
     generate_recipient, recipient_from_seed, recipient_id, RecipientKeypair,

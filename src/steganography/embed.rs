@@ -412,6 +412,18 @@ fn split_stream(stream: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (hdr, payload)
 }
 
+/// Watson-style perceptual delta: smooth blocks get smaller delta,
+/// textured blocks get larger delta. Invisible on smooth, robust on texture.
+fn watson_delta(block: &[f32; BLOCK_AREA], base_delta: f32) -> f32 {
+    // Activity = std of 8x8 block pixels
+    let mean = block.iter().sum::<f32>() / 64.0;
+    let var = block.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / 64.0;
+    let std = var.sqrt();
+    // Map std [0..40] -> factor [0.6..1.8]
+    let factor = (0.6 + (std / 40.0) * 1.2).clamp(0.6, 1.8);
+    base_delta * factor
+}
+
 fn embed_robust_with_delta(mut rgb: RgbImage, stream: &[u8], delta: f32) -> Result<RgbImage> {
     let (hdr, payload) = split_stream(stream);
     let mut all_bits = multiply_bits(&bytes_to_bits(&hdr), HEADER_COPIES);
@@ -436,10 +448,12 @@ fn embed_robust_with_delta(mut rgb: RgbImage, stream: &[u8], delta: f32) -> Resu
             }
             let mut dct = [0.0f32; BLOCK_AREA];
             dct8x8(&block, &mut dct);
+            // Watson masking: adaptive delta for this block
+            let block_delta = watson_delta(&block, delta);
             let bstart = bit_i;
             for &idx in ROBUST_IDX.iter() {
                 if bit_i >= all_bits.len() { break; }
-                dct[idx] = qim_place(dct[idx], all_bits[bit_i], delta);
+                dct[idx] = qim_place(dct[idx], all_bits[bit_i], block_delta);
                 bit_i += 1;
             }
             let bend = bit_i;

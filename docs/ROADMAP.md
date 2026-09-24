@@ -3,42 +3,34 @@
 ## Done
 
 - v3.0-v3.6: AeroGlint core, AeroPack v20, AeroFlow, print pipeline
-- v3.7-v3.9: DCT stego, QIM, LSB, Robust, DualB, FMS3 with Ed25519
-- v3.10: Per-install identity + root attestation
-- v3.11: TSA, OpenTimestamps, fm_status, fm_sign, fm_verify
-- v3.12-v3.13: Sauvola binarization, docs
-- v3.14: Web mode toggle, GUI multi-sig in-memory, WASM CI fix
-- v3.14.7: Web stego carrier form, ARQ UI, scanner HUD, .gitattributes
+- v3.7-v3.9: DCT stego, QIM, LSB, Robust, DualB, FMS3 + Ed25519
+- v3.10: per-install identity + root attestation
+- v3.11: TSA, OpenTimestamps, fm_status/sign/verify
+- v3.12-v3.13: Sauvola, docs
+- v3.14: web mode toggle, GUI multi-sig (in-memory), WASM CI fix, .gitattributes
+- v3.15.0: **Watson masking, ZKP (Schnorr NIZK), OTS upgrade**
 
-## Next (concrete)
+## Next
 
-### v3.15.x - web polish
+### v3.16.x - deep algorithmic
 
-- Progressive scroll preview
-- Better error states
-- Offline manifest bump
-
-### v3.16.x - deep algorithmic (see docs/RESEARCH.md)
-
-- Progressive decoding (metadata low-freq)
-- Fountain codes (LT, 50% loss tolerance)
+- Progressive decoding (see docs/RESEARCH.md #1)
+- Fountain codes (LT, #2)
 
 ### v3.17.x - performance
 
-- WebGL / WebGPU FFT
+- WebGL / WebGPU FFT (#3)
 - WebWorkers + WASM threads
-- Zero-copy pipeline
 
 ### v3.18.x - density
 
-- 16-QAM / 64-QAM adaptive
-- RGB-split (3 independent FFT grids)
+- RGB-split (3x) (#5)
+- 16-QAM / 64-QAM (#6)
 
-### v4.x - attestation+
+### v4.x
 
-- Blockchain anchor (Bitcoin OTS)
-- Zero-knowledge proof of ownership
-- AI-robust stego
+- Full blockchain anchor UI (#7)
+- AI-robust stego (#8)
 
 ## Not planned
 
